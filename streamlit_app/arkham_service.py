@@ -2,7 +2,7 @@
 import pandas as pd
 from arkham.arkham_monitor import ArkhamMonitor # Убедиться, что путь импорта соответствует структуре arkham_client
 import requests # Для обработки возможных исключений RequestException
-from typing import Tuple, List, Dict, Optional, Any # Добавил Any для DataFrame в Python < 3.9
+from typing import Tuple, List, Dict, Optional, Any, Set # Добавил Any для DataFrame в Python < 3.9 и Set
 
 def create_monitor(api_key: str) -> Optional[ArkhamMonitor]:
     """Создает и возвращает экземпляр ArkhamMonitor."""
@@ -38,6 +38,59 @@ def populate_arkham_cache(monitor: ArkhamMonitor, lookback: str, min_usd: float,
         error_msg = f"Непредвиденная ошибка при обновлении кеша Arkham: {e}"
         print(error_msg)
         return [], [], error_msg
+
+def get_detailed_token_info(monitor: ArkhamMonitor) -> Tuple[Optional[Dict[str, Set[str]]], Optional[str]]:
+    """
+    Получает детализированную информацию о токенах (символ -> множество ID).
+    Возвращает (token_details_map, error_message_or_none).
+    """
+    if not monitor:
+        return None, "Экземпляр ArkhamMonitor не инициализирован."
+    try:
+        token_map = monitor.get_token_symbol_map()
+        # Дополнительно отфильтруем, чтобы ключи соответствовали get_known_token_symbols()
+        # Это важно, если get_token_symbol_map может содержать больше символов, чем get_known_token_symbols
+        known_symbols = monitor.get_known_token_symbols()
+        filtered_token_map = {sym: ids for sym, ids in token_map.items() if sym in known_symbols}
+        return filtered_token_map, None
+    except Exception as e:
+        error_msg = f"Непредвиденная ошибка при получении детальной информации о токенах: {e}"
+        print(error_msg)
+        return None, error_msg
+
+def get_detailed_address_info(monitor: ArkhamMonitor) -> Tuple[Optional[Dict[str, int]], Optional[str]]:
+    """
+    Получает детализированную информацию об адресах (имя -> количество связанных ID).
+    Возвращает (address_details_map, error_message_or_none).
+    """
+    if not monitor:
+        return None, "Экземпляр ArkhamMonitor не инициализирован."
+    try:
+        known_names = monitor.get_known_address_names()
+        address_info_map = {}
+        if hasattr(monitor, 'address_cache') and monitor.address_cache is not None:
+            for name in known_names:
+                # Предполагаем, что monitor.address_cache.get_identifiers_by_name(name) существует и возвращает set
+                try:
+                    associated_ids = monitor.address_cache.get_identifiers_by_name(name)
+                    address_info_map[name] = len(associated_ids)
+                except AttributeError: # Если у address_cache нет такого метода
+                    address_info_map[name] = 0 # Или другое значение по умолчанию
+                    print(f"Warning: monitor.address_cache.get_identifiers_by_name отсутствует.")
+                except Exception as e_inner:
+                    print(f"Error getting ID count for address {name}: {e_inner}")
+                    address_info_map[name] = 0 # Ошибка при получении, ставим 0
+        else:
+            # Если нет address_cache, заполняем нулями или другим индикатором
+            for name in known_names:
+                address_info_map[name] = 0 
+            print("Warning: monitor.address_cache отсутствует. Детальная информация по адресам не будет полной.")
+            
+        return address_info_map, None
+    except Exception as e:
+        error_msg = f"Непредвиденная ошибка при получении детальной информации об адресах: {e}"
+        print(error_msg)
+        return None, error_msg
 
 def fetch_transactions(monitor: ArkhamMonitor, filter_params: Dict[str, Any], query_limit: int) -> Tuple[Optional[pd.DataFrame], Optional[str]]:
     """

@@ -46,6 +46,8 @@ def initialize_session_state():
         st.session_state.known_tokens = []
         st.session_state.known_addresses = []
         st.session_state.transactions_df = pd.DataFrame() 
+        st.session_state.detailed_token_info = {} # Новое состояние
+        st.session_state.detailed_address_info = {} # Новое состояние
         
         # Значения по умолчанию для виджетов, которые будут использоваться как ключи в session_state
         # Эти значения будут использованы при первом рендере виджетов, если key совпадает.
@@ -81,12 +83,29 @@ def handle_populate_cache_button():
             st.session_state.known_tokens = []
             st.session_state.known_addresses = []
             st.session_state.cache_initialized_flag = False
+            st.session_state.detailed_token_info = {}
+            st.session_state.detailed_address_info = {}
         else:
             st.session_state.known_tokens = tokens
             st.session_state.known_addresses = addresses
             st.session_state.cache_initialized_flag = True
             st.session_state.error_message = None # Очищаем предыдущие ошибки
             st.success(f"Кеш успешно обновлен. Загружено {len(tokens)} токенов и {len(addresses)} адресов.")
+
+            # Получаем детализированную информацию
+            token_details, token_err = arkham_service.get_detailed_token_info(st.session_state.arkham_monitor)
+            if token_err:
+                st.warning(f"Не удалось получить детали по токенам: {token_err}")
+                st.session_state.detailed_token_info = {}
+            else:
+                st.session_state.detailed_token_info = token_details if token_details is not None else {}
+            
+            address_details, addr_err = arkham_service.get_detailed_address_info(st.session_state.arkham_monitor)
+            if addr_err:
+                st.warning(f"Не удалось получить детали по адресам: {addr_err}")
+                st.session_state.detailed_address_info = {}
+            else:
+                st.session_state.detailed_address_info = address_details if address_details is not None else {}
     else:
         st.session_state.error_message = "Arkham Monitor не инициализирован. Невозможно обновить кеш."
 
@@ -242,19 +261,63 @@ def render_main_content():
     with st.expander("Информация о кеше (адреса и токены)", expanded=False):
         known_tokens_list = st.session_state.get('known_tokens', [])
         known_addresses_list = st.session_state.get('known_addresses', [])
-        st.write(f"Уникальных имен/адресов в кеше: {len(known_addresses_list)}")
-        if st.button("Показать список адресов", key="show_addresses_btn"):
-            if known_addresses_list:
-                st.json(known_addresses_list)
+        cache_initialized = st.session_state.get('cache_initialized_flag', False)
+
+        tab1, tab2, tab3 = st.tabs(["Сводка", "Известные Адреса", "Известные Токены"])
+
+        with tab1: # Сводка
+            if not cache_initialized:
+                st.info("Кеш еще не инициализирован. Пожалуйста, загрузите его, используя опцию в сайдбаре.")
             else:
-                st.info("Список адресов пуст. Загрузите кеш.")
+                detailed_addresses_count = len(st.session_state.get('detailed_address_info', {}))
+                detailed_tokens_count = len(st.session_state.get('detailed_token_info', {}))
+                st.write(f"Уникальных имен/адресов в кеше: {len(known_addresses_list)} (детализировано: {detailed_addresses_count})")
+                st.write(f"Уникальных символов токенов в кеше: {len(known_tokens_list)} (детализировано: {detailed_tokens_count})")
+                if not known_addresses_list and not known_tokens_list:
+                    st.write("Кеш был инициализирован, но не содержит данных (0 адресов, 0 токенов).")
+
+        with tab2: # Известные Адреса
+            if not cache_initialized:
+                st.info("Кеш не инициализирован. Данные об адресах отсутствуют.")
+            elif not known_addresses_list:
+                st.info("Список известных адресов пуст. Загрузите или обновите кеш из сайдбара.")
+            else:
+                # Готовим данные для DataFrame
+                data_for_addresses_df = []
+                detailed_address_info = st.session_state.get('detailed_address_info', {})
+                for name in known_addresses_list: # known_addresses_list уже отсортирован из кеша
+                    count = detailed_address_info.get(name, 0) # Получаем количество ID
+                    data_for_addresses_df.append({"Адрес/Имя": name, "Кол-во связанных ID": count})
+                
+                df_addresses = pd.DataFrame(data_for_addresses_df)
+                st.dataframe(df_addresses, use_container_width=True, height=300)
         
-        st.write(f"Уникальных символов токенов в кеше: {len(known_tokens_list)}")
-        if st.button("Показать список токенов", key="show_tokens_btn"):
-            if known_tokens_list:
-                st.json(known_tokens_list)
+        with tab3: # Известные Токены
+            if not cache_initialized:
+                st.info("Кеш не инициализирован. Данные о токенах отсутствуют.")
+            elif not known_tokens_list:
+                st.info("Список известных токенов пуст. Загрузите или обновите кеш из сайдбара.")
             else:
-                st.info("Список токенов пуст. Загрузите кеш.")
+                # Готовим данные для DataFrame
+                data_for_tokens_df = []
+                detailed_token_info = st.session_state.get('detailed_token_info', {})
+                for symbol in known_tokens_list: # known_tokens_list уже отсортирован из кеша
+                    ids_set = detailed_token_info.get(symbol, set())
+                    ids_str = ", ".join(sorted(list(ids_set))) # Отображаем ID через запятую, отсортировав
+                    count_ids = len(ids_set)
+                    # Можно выбрать, что отображать: сами ID или их количество, или и то и другое
+                    data_for_tokens_df.append({"Символ Токена": symbol, "ID Токенов": ids_str, "Кол-во ID": count_ids})
+                
+                df_tokens = pd.DataFrame(data_for_tokens_df)
+                # Конфигурируем колонки, чтобы ID были видны, если они длинные
+                st.dataframe(
+                    df_tokens, 
+                    use_container_width=True, 
+                    height=300,
+                    column_config={
+                        "ID Токенов": st.column_config.TextColumn(width="large")
+                    }
+                )
 
 def main():
     st.set_page_config(layout="wide", page_title="Arkham Client Explorer")
