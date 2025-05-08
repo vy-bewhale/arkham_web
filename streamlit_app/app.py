@@ -4,18 +4,7 @@ import pandas as pd
 import os
 from dotenv import load_dotenv
 import arkham_service # Модуль с логикой Arkham
-from typing import List, Dict, Any, Tuple, Optional # Нужен typing для подсказок типов
-
-def load_custom_css(file_path: str):
-    """Загружает и применяет CSS из файла."""
-    # Более надежный путь к CSS, если скрипт запускается из разных мест
-    abs_path = os.path.join(os.path.dirname(__file__), file_path)
-    if os.path.exists(abs_path):
-        with open(abs_path, "r") as f:
-            css_content = f.read()
-            st.markdown(f"<style>{css_content}</style>", unsafe_allow_html=True)
-    else:
-        st.warning(f"CSS file not found at {abs_path}")
+from typing import List, Dict, Any, Tuple, Optional, Set # Нужен typing для подсказок типов
 
 def initialize_session_state():
     """Инициализирует st.session_state при первом запуске или если ключевые переменные отсутствуют."""
@@ -83,37 +72,40 @@ def handle_populate_cache_button():
             st.session_state.known_tokens = []
             st.session_state.known_addresses = []
             st.session_state.cache_initialized_flag = False
-            st.session_state.detailed_token_info = {}
-            st.session_state.detailed_address_info = {}
+            st.session_state.detailed_token_info = {} # Возвращаем
+            st.session_state.detailed_address_info = {} # Возвращаем
         else:
-            st.session_state.known_tokens = tokens
-            st.session_state.known_addresses = addresses
+            st.session_state.known_tokens = tokens # Возвращаем
+            st.session_state.known_addresses = addresses # Возвращаем
             st.session_state.cache_initialized_flag = True
             st.session_state.error_message = None # Очищаем предыдущие ошибки
-            st.success(f"Кеш успешно обновлен. Загружено {len(tokens)} токенов и {len(addresses)} адресов.")
+            st.success(f"Кеш успешно обновлен. Загружено {len(tokens)} токенов и {len(addresses)} адресов.") # Возвращаем исходное сообщение
 
             # Получаем детализированную информацию
             token_details, token_err = arkham_service.get_detailed_token_info(st.session_state.arkham_monitor)
             if token_err:
                 st.warning(f"Не удалось получить детали по токенам: {token_err}")
-                st.session_state.detailed_token_info = {}
+                st.session_state.detailed_token_info = {} # Возвращаем
             else:
-                st.session_state.detailed_token_info = token_details if token_details is not None else {}
+                st.session_state.detailed_token_info = token_details if token_details is not None else {} # Возвращаем
             
             address_details, addr_err = arkham_service.get_detailed_address_info(st.session_state.arkham_monitor)
             if addr_err:
                 st.warning(f"Не удалось получить детали по адресам: {addr_err}")
-                st.session_state.detailed_address_info = {}
+                st.session_state.detailed_address_info = {} # Возвращаем
             else:
-                st.session_state.detailed_address_info = address_details if address_details is not None else {}
+                st.session_state.detailed_address_info = address_details if address_details is not None else {} # Возвращаем
+        # st.rerun() # Убираем rerun
     else:
         st.session_state.error_message = "Arkham Monitor не инициализирован. Невозможно обновить кеш."
+        # st.rerun() # Убираем rerun
 
 def handle_fetch_transactions_button():
     """Обработчик для кнопки "Найти Транзакции"."""
     if not st.session_state.arkham_monitor:
         st.session_state.error_message = "Arkham Monitor не инициализирован. Невозможно выполнить запрос."
         st.session_state.transactions_df = pd.DataFrame() # Очищаем старые результаты
+        # st.rerun() # Убираем rerun
         return
 
     if not st.session_state.cache_initialized_flag:
@@ -144,6 +136,7 @@ def handle_fetch_transactions_button():
             st.info("Транзакции по заданным фильтрам не найдены.")
         else:
             st.success(f"Найдено транзакций: {len(st.session_state.transactions_df)}")
+    # st.rerun() # Убираем rerun
 
 def render_sidebar():
     """Отрисовывает боковую панель."""
@@ -320,8 +313,11 @@ def render_main_content():
                 )
 
 def main():
+    # st.set_page_config ДОЛЖЕН БЫТЬ ПЕРВОЙ КОМАНДОЙ STREAMLIT
     st.set_page_config(layout="wide", page_title="Arkham Client Explorer")
-    load_custom_css("assets/style.css") 
+    # Загружаем CSS сразу после page_config
+    # load_custom_css("assets/style.css") 
+    
     initialize_session_state()
 
     # Отображаем ошибку инициализации если есть, и останавливаемся, если критично
@@ -341,4 +337,5 @@ def main():
     render_main_content() # Вызов функции отрисовки основного контента
 
 if __name__ == "__main__":
+    # load_custom_css("assets/style.css") # Убираем отсюда, если он был здесь ранее глобально
     main() 
