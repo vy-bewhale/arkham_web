@@ -157,62 +157,57 @@ def render_sidebar():
         )
         st.button("Загрузить/Обновить кеш", on_click=handle_populate_cache_button, key="populate_cache_btn")
     
-    st.sidebar.subheader("Фильтры Транзакций")
-    
-    # Изменяем пропорции колонок на [2, 1]
-    cols = st.sidebar.columns([2, 1])
-    # Value убран
-    cols[0].number_input(
-        "Мин. сумма USD", 
-        min_value=0.0, 
-        step=10000.0, 
-        key='min_usd_query_input', 
-        format="%.0f",
-        help="Минимальная сумма транзакции в USD для основного запроса."
-    )
-    cols[1].selectbox(
-        "Период", 
-        ['1h', '6h', '12h', '24h', '3d', '7d', '30d'], 
-        key='lookback_query_input', 
-        help="Временной период для основного запроса транзакций."
-    )
-    st.sidebar.multiselect(
-        "Фильтр по токенам", 
-        options=st.session_state.get('known_tokens', []),
-        key='token_symbols_multiselect',
-        help="Выберите символы токенов. Список обновляется после загрузки/обновления кеша."
-    )
-    st.sidebar.multiselect(
-        "Фильтр по отправителю", 
-        options=st.session_state.get('known_addresses', []),
-        key='from_address_names_multiselect',
-        help="Выберите имена/адреса отправителей. Список обновляется после загрузки/обновления кеша."
-    )
-    st.sidebar.multiselect(
-        "Фильтр по получателю", 
-        options=st.session_state.get('known_addresses', []),
-        key='to_address_names_multiselect',
-        help="Выберите имена/адреса получателей. Список обновляется после загрузки/обновления кеша."
-    )
-    # Value убран
-    st.sidebar.number_input(
-        "Лимит транзакций в результате", 
-        min_value=1, 
-        max_value=1000, 
-        step=10, 
-        key='limit_query_input', 
-        help="Максимальное кол-во транзакций в итоговом результате."
-    )
-    st.sidebar.button("Найти Транзакции", on_click=handle_fetch_transactions_button, key="fetch_transactions_btn")
-
-@st.cache_data
-def convert_df_to_csv(df: pd.DataFrame) -> bytes:
-    """Конвертирует DataFrame в CSV байты для скачивания."""
-    return df.to_csv(index=False).encode('utf-8')
+    with st.sidebar.expander("Фильтры Транзакций", expanded=True):
+        # Изменяем пропорции колонок на [2, 1]
+        cols = st.columns([2, 1])
+        # Value убран
+        cols[0].number_input(
+            "Мин. сумма USD", 
+            min_value=0.0, 
+            step=10000.0, 
+            key='min_usd_query_input', 
+            format="%.0f",
+            help="Минимальная сумма транзакции в USD для основного запроса."
+        )
+        cols[1].selectbox(
+            "Период", 
+            ['1h', '6h', '12h', '24h', '3d', '7d', '30d'], 
+            key='lookback_query_input', 
+            help="Временной период для основного запроса транзакций."
+        )
+        # Все фильтры и кнопка поиска теперь внутри этого экспандера
+        st.multiselect(
+            "Фильтр по токенам", 
+            options=st.session_state.get('known_tokens', []),
+            key='token_symbols_multiselect',
+            help="Выберите символы токенов. Список обновляется после загрузки/обновления кеша."
+        )
+        st.multiselect(
+            "Фильтр по отправителю", 
+            options=st.session_state.get('known_addresses', []),
+            key='from_address_names_multiselect',
+            help="Выберите имена/адреса отправителей. Список обновляется после загрузки/обновления кеша."
+        )
+        st.multiselect(
+            "Фильтр по получателю", 
+            options=st.session_state.get('known_addresses', []),
+            key='to_address_names_multiselect',
+            help="Выберите имена/адреса получателей. Список обновляется после загрузки/обновления кеша."
+        )
+        # Value убран
+        st.number_input(
+            "Лимит транзакций в результате", 
+            min_value=1, 
+            max_value=1000, 
+            step=10, 
+            key='limit_query_input', 
+            help="Максимальное кол-во транзакций в итоговом результате."
+        )
+        st.button("Найти Транзакции", on_click=handle_fetch_transactions_button, key="fetch_transactions_btn")
 
 def render_main_content():
     """Отрисовывает основное содержимое страницы."""
-    st.title("Arkham Client Explorer")
+    # st.title("Arkham Client Explorer") # Удаляем заголовок
 
     # Отображение ошибок из session_state, если они не были обработаны кнопками
     if st.session_state.get('error_message'):
@@ -231,17 +226,15 @@ def render_main_content():
     # Отображение Транзакций
     transactions_df = st.session_state.get('transactions_df', pd.DataFrame())
     if not transactions_df.empty:
-        st.header("Найденные транзакции")
-        st.dataframe(transactions_df, use_container_width=True)
-        
-        csv_data = convert_df_to_csv(transactions_df)
-        st.download_button(
-            label="Скачать CSV",
-            data=csv_data,
-            file_name="arkham_transactions.csv",
-            mime="text/csv",
-            key="download_csv_btn"
-        )
+        with st.expander("Найденные транзакции", expanded=True):
+            st.dataframe(
+                transactions_df, 
+                use_container_width=True,
+                column_config={
+                    "Откуда": st.column_config.TextColumn(width="medium"),
+                    "Куда": st.column_config.TextColumn(width="medium")
+                }
+            )
     # Сообщение "не найдено" выводится в handle_fetch_transactions_button через st.info, 
     # здесь дополнительно можно не дублировать, если только не хотим специфичное отображение.
 
