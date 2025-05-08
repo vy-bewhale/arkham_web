@@ -2,6 +2,7 @@
 import streamlit as st
 import pandas as pd
 import os
+import time # Добавляем импорт time
 from dotenv import load_dotenv
 import arkham_service # Модуль с логикой Arkham
 from typing import List, Dict, Any, Tuple, Optional, Set # Нужен typing для подсказок типов
@@ -50,6 +51,10 @@ def initialize_session_state():
         st.session_state.from_address_names_multiselect = []
         st.session_state.to_address_names_multiselect = []
         st.session_state.limit_query_input = 50
+        
+        # Состояние автообновления
+        st.session_state.auto_refresh_enabled = False
+        st.session_state.auto_refresh_interval = 60
         
         st.session_state.initialized = True
 
@@ -100,17 +105,24 @@ def handle_populate_cache_button():
         st.session_state.error_message = "Arkham Monitor не инициализирован. Невозможно обновить кеш."
         # st.rerun() # Убираем rerun
 
-def handle_fetch_transactions_button():
-    """Обработчик для кнопки "Найти Транзакции"."""
+def handle_auto_refresh_toggle():
+    """Обработчик для переключателя автообновления (просто переключает флаг)."""
+    # Логика запуска/остановки потока удалена
+    # Состояние auto_refresh_enabled меняется автоматически виджетом st.toggle
+    pass # Теперь эта функция может быть пустой или ее можно убрать, если on_change не нужен 
+         # Оставим пока pass для ясности, что on_change был, но логика изменилась.
+         # Или можно убрать on_change из st.toggle ниже.
+
+def _fetch_and_update_table():
+    """Получает транзакции и обновляет session_state."""
     if not st.session_state.arkham_monitor:
         st.session_state.error_message = "Arkham Monitor не инициализирован. Невозможно выполнить запрос."
         st.session_state.transactions_df = pd.DataFrame() # Очищаем старые результаты
-        # st.rerun() # Убираем rerun
+        st.toast("Ошибка: Монитор Arkham не инициализирован.", icon="🚨")
         return
 
     if not st.session_state.cache_initialized_flag:
         st.warning("Внимание: Кеш адресов и токенов не был инициализирован или обновлен. Фильтрация по именам и токенам может быть неэффективной.")
-        # Продолжаем выполнение, но с предупреждением
 
     filter_params = {
         'min_usd': st.session_state.min_usd_query_input,
@@ -129,13 +141,20 @@ def handle_fetch_transactions_button():
     if error:
         st.session_state.error_message = error
         st.session_state.transactions_df = pd.DataFrame() # Очищаем старые результаты
+        st.toast(f"Ошибка при получении транзакций: {error}", icon="🚨")
     else:
         st.session_state.transactions_df = df if df is not None else pd.DataFrame()
         st.session_state.error_message = None # Очищаем предыдущие ошибки
         if st.session_state.transactions_df.empty:
             st.info("Транзакции по заданным фильтрам не найдены.")
         else:
-            st.success(f"Найдено транзакций: {len(st.session_state.transactions_df)}")
+            # Убираем success toast отсюда, т.к. он будет мешать при автообновлении
+            # st.success(f"Найдено транзакций: {len(st.session_state.transactions_df)}") 
+            pass # Просто обновляем данные
+
+def handle_fetch_transactions_button():
+    """Обработчик для кнопки "Найти Транзакции"."""
+    _fetch_and_update_table() # Просто вызываем общую функцию
     # st.rerun() # Убираем rerun
 
 def render_sidebar():
@@ -216,6 +235,22 @@ def render_sidebar():
             help="Максимальное кол-во транзакций в итоговом результате."
         )
         st.button("Найти Транзакции", on_click=handle_fetch_transactions_button, key="fetch_transactions_btn")
+
+    with st.sidebar.expander("Автоматическое Обновление"):
+        st.toggle(
+            "Включить", 
+            key='auto_refresh_enabled', 
+            # on_change=handle_auto_refresh_toggle, # Убираем on_change, т.к. логика теперь в main
+            help="Автоматически обновлять таблицу транзакций. ВНИМАНИЕ: Приложение будет неактивно во время ожидания интервала."
+        )
+        st.number_input(
+            "Интервал обновления (сек)", 
+            min_value=10, 
+            step=10, 
+            key='auto_refresh_interval', 
+            help="Как часто обновлять таблицу (минимум 10 секунд).",
+            # disabled=st.session_state.get('auto_refresh_running', False) # Убираем disabled, т.к. нет auto_refresh_running
+        )
 
 def render_main_content():
     """Отрисовывает основное содержимое страницы."""
@@ -335,6 +370,18 @@ def main():
 
     render_sidebar()
     render_main_content() # Вызов функции отрисовки основного контента
+
+    # --- Логика автообновления --- 
+    if st.session_state.get('auto_refresh_enabled', False):
+        interval = st.session_state.get('auto_refresh_interval', 60)
+        # Добавим небольшое сообщение в сам UI перед сном
+        placeholder = st.empty() 
+        placeholder.info(f"Автообновление таблицы через {interval} сек...")
+        time.sleep(interval) 
+        placeholder.empty() # Убираем сообщение перед обновлением
+        _fetch_and_update_table() # Выполняем обновление
+        st.rerun() # Перезапускаем скрипт, чтобы отобразить обновленную таблицу и начать следующий цикл ожидания
+    # -----------------------------
 
 if __name__ == "__main__":
     # load_custom_css("assets/style.css") # Убираем отсюда, если он был здесь ранее глобально
