@@ -162,9 +162,8 @@ def handle_fetch_transactions_button():
 
 def render_sidebar():
     """Отрисовывает боковую панель."""
-    st.sidebar.title("Фильтры и Параметры")
 
-    with st.sidebar.expander("Настройки API и Кеша", expanded=True):
+    with st.sidebar.expander("Настройки API и Кеша", expanded=False):
         st.selectbox(
             "Период для кеша", 
             ['24h', '7d', '30d'], 
