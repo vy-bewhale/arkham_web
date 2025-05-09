@@ -92,22 +92,17 @@ def get_detailed_address_info(monitor: ArkhamMonitor) -> Tuple[Optional[Dict[str
         print(error_msg)
         return None, error_msg
 
-def fetch_transactions(monitor: ArkhamMonitor, filter_params: Dict[str, Any], query_limit: int) -> Tuple[Optional[pd.DataFrame], Optional[str]]:
+def fetch_transactions(monitor: ArkhamMonitor, filter_params: Dict[str, Any], query_limit: int) -> Tuple[Optional[pd.DataFrame], Optional[str], Optional[Dict[str, Any]]]:
     """
     Получает транзакции на основе заданных фильтров.
-    Возвращает (transactions_df, error_message_or_none).
+    Возвращает (transactions_df, error_message_or_none, api_params_for_debug).
     filter_params может содержать: min_usd, lookback, token_symbols, from_address_names, to_address_names
     """
+    api_params_for_debug = None # Инициализируем
     if not monitor:
-        return None, "Экземпляр ArkhamMonitor не инициализирован."
+        return None, "Экземпляр ArkhamMonitor не инициализирован.", api_params_for_debug
     try:
-        # Формируем аргументы для set_filters, исключая None и пустые списки, если это необходимо для библиотеки
-        # Однако, оригинальная библиотека arkham_client должна сама корректно обрабатывать None/пустые списки.
-        # Поэтому передаем как есть, если библиотека это поддерживает.
         active_filters = {k: v for k, v in filter_params.items() if v is not None}
-        # Если token_symbols, from_address_names, to_address_names пустые списки, 
-        # и библиотека их не должна принимать как "без фильтра", их нужно убрать или передать None.
-        # Предполагаем, что библиотека корректно обработает пустые списки как "не применять этот фильтр".
         
         monitor.set_filters(
             min_usd=active_filters.get('min_usd'),
@@ -116,13 +111,17 @@ def fetch_transactions(monitor: ArkhamMonitor, filter_params: Dict[str, Any], qu
             from_address_names=active_filters.get('from_address_names'),
             to_address_names=active_filters.get('to_address_names')
         )
+        # Получаем сформированные параметры API для отладки
+        if hasattr(monitor, 'filter') and monitor.filter is not None:
+             api_params_for_debug = monitor.filter.get_api_params(limit=query_limit)
+             
         transactions_df = monitor.get_transactions(limit=query_limit)
-        return transactions_df, None
+        return transactions_df, None, api_params_for_debug
     except requests.exceptions.RequestException as e:
         error_msg = f"Сетевая ошибка при запросе транзакций Arkham: {e}"
         print(error_msg)
-        return None, error_msg
+        return None, error_msg, api_params_for_debug
     except Exception as e:
         error_msg = f"Непредвиденная ошибка при запросе транзакций Arkham: {e}"
         print(error_msg)
-        return None, error_msg 
+        return None, error_msg, api_params_for_debug 

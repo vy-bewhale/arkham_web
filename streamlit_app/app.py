@@ -134,9 +134,12 @@ def _fetch_and_update_table():
     query_limit = st.session_state.limit_query_input
 
     with st.spinner("Запрос транзакций..."):
-        df, error = arkham_service.fetch_transactions(
+        df, error, api_params_debug = arkham_service.fetch_transactions(
             st.session_state.arkham_monitor, filter_params, query_limit
         )
+    
+    # Сохраняем параметры отладки в session_state
+    st.session_state.api_params_debug = api_params_debug 
     
     if error:
         st.session_state.error_message = error
@@ -277,6 +280,7 @@ def render_main_content():
             st.dataframe(
                 transactions_df, 
                 use_container_width=True,
+                height=600,  # Увеличиваем высоту таблицы
                 column_config={
                     "Откуда": st.column_config.TextColumn(width="medium"),
                     "Куда": st.column_config.TextColumn(width="medium")
