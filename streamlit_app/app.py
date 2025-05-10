@@ -333,92 +333,76 @@ def render_sidebar():
         )
 
 def render_main_content():
-    """Отрисовывает основное содержимое страницы."""
-    # st.title("Arkham Client Explorer") # Удаляем заголовок
-
-    # Отображение ошибок из session_state, если они не были обработаны кнопками
     if st.session_state.get('error_message'):
         st.error(st.session_state.error_message)
-        st.session_state.error_message = None # Сбрасываем после отображения
-
-    # Общая информация и статус
+        st.session_state.error_message = None
     if st.session_state.get('api_key_loaded') and st.session_state.get('arkham_monitor'):
         if not st.session_state.get('cache_initialized_flag'):
             st.info("Данные для кеша (имена адресов, символы токенов) еще не загружены. Используйте кнопку в сайдбаре для загрузки.")
     else:
-        # Ошибка уже должна была быть показана в main() и приложение остановлено, но на всякий случай
         st.error("Приложение не может функционировать без API ключа или инициализации монитора.")
-        return # Не рендерим дальше, если нет монитора
-        
-    # Отображение Транзакций
+        return
     transactions_df = st.session_state.get('transactions_df', pd.DataFrame())
     if not transactions_df.empty:
         with st.expander("Найденные транзакции", expanded=True):
             st.dataframe(
                 transactions_df, 
                 use_container_width=True,
-                height=600,  # Увеличиваем высоту таблицы
+                height=600,
                 column_config={
                     "Откуда": st.column_config.TextColumn(width="medium"),
                     "Куда": st.column_config.TextColumn(width="medium")
                 }
             )
-    # Сообщение "не найдено" выводится в handle_fetch_transactions_button через st.info, 
-    # здесь дополнительно можно не дублировать, если только не хотим специфичное отображение.
-
-    # Информация о Кеше
     with st.expander("Информация о кеше (адреса и токены)", expanded=False):
         known_tokens_list = st.session_state.get('known_tokens', [])
         known_addresses_list = st.session_state.get('known_addresses', [])
         cache_initialized = st.session_state.get('cache_initialized_flag', False)
-
         tab1, tab2, tab3 = st.tabs(["Сводка", "Известные Адреса", "Известные Токены"])
-
-        with tab1: # Сводка
+        with tab1:
             if not cache_initialized:
                 st.info("Кеш еще не инициализирован. Пожалуйста, загрузите его, используя опцию в сайдбаре.")
             else:
-                detailed_addresses_count = len(st.session_state.get('detailed_address_info', {}))
-                detailed_tokens_count = len(st.session_state.get('detailed_token_info', {}))
-                st.write(f"Уникальных имен/адресов в кеше: {len(known_addresses_list)} (детализировано: {detailed_addresses_count})")
-                st.write(f"Уникальных символов токенов в кеше: {len(known_tokens_list)} (детализировано: {detailed_tokens_count})")
+                detailed_address_info = st.session_state.get('detailed_address_info', {})
+                total_detailed_addresses_ids = sum(detailed_address_info.values()) if detailed_address_info else 0
+                detailed_token_info = st.session_state.get('detailed_token_info', {})
+                total_detailed_tokens_ids = sum(len(ids) for ids in detailed_token_info.values()) if detailed_token_info else 0
+                st.write(f"Уникальных имен/адресов в кеше: {len(known_addresses_list)} (связанных ID: {total_detailed_addresses_ids})")
+                st.write(f"Уникальных символов токенов в кеше: {len(known_tokens_list)} (связанных ID: {total_detailed_tokens_ids})")
                 if not known_addresses_list and not known_tokens_list:
                     st.write("Кеш был инициализирован, но не содержит данных (0 адресов, 0 токенов).")
-
-        with tab2: # Известные Адреса
+                ls_size_mb = get_localstorage_size()
+                if ls_size_mb >= 0:
+                    st.write(f"Размер сохраненных данных в localStorage: {ls_size_mb:.2f} МБ")
+                else:
+                    st.write("Не удалось определить размер данных в localStorage.")
+        with tab2:
             if not cache_initialized:
                 st.info("Кеш не инициализирован. Данные об адресах отсутствуют.")
             elif not known_addresses_list:
                 st.info("Список известных адресов пуст. Загрузите или обновите кеш из сайдбара.")
             else:
-                # Готовим данные для DataFrame
                 data_for_addresses_df = []
                 detailed_address_info = st.session_state.get('detailed_address_info', {})
-                for name in known_addresses_list: # known_addresses_list уже отсортирован из кеша
-                    count = detailed_address_info.get(name, 0) # Получаем количество ID
+                for name in known_addresses_list:
+                    count = detailed_address_info.get(name, 0)
                     data_for_addresses_df.append({"Адрес/Имя": name, "Кол-во связанных ID": count})
-                
                 df_addresses = pd.DataFrame(data_for_addresses_df)
                 st.dataframe(df_addresses, use_container_width=True, height=300)
-        
-        with tab3: # Известные Токены
+        with tab3:
             if not cache_initialized:
                 st.info("Кеш не инициализирован. Данные о токенах отсутствуют.")
             elif not known_tokens_list:
                 st.info("Список известных токенов пуст. Загрузите или обновите кеш из сайдбара.")
             else:
-                # Готовим данные для DataFrame
                 data_for_tokens_df = []
                 detailed_token_info = st.session_state.get('detailed_token_info', {})
-                for symbol in known_tokens_list: # known_tokens_list уже отсортирован из кеша
+                for symbol in known_tokens_list:
                     ids_set = detailed_token_info.get(symbol, set())
-                    ids_str = ", ".join(sorted(list(ids_set))) # Отображаем ID через запятую, отсортировав
+                    ids_str = ", ".join(sorted(list(ids_set)))
                     count_ids = len(ids_set)
-                    # Можно выбрать, что отображать: сами ID или их количество, или и то и другое
                     data_for_tokens_df.append({"Символ Токена": symbol, "ID Токенов": ids_str, "Кол-во ID": count_ids})
-                
                 df_tokens = pd.DataFrame(data_for_tokens_df)
-                # Конфигурируем колонки, чтобы ID были видны, если они длинные
                 st.dataframe(
                     df_tokens, 
                     use_container_width=True, 
@@ -427,6 +411,17 @@ def render_main_content():
                         "ID Токенов": st.column_config.TextColumn(width="large")
                     }
                 )
+
+def get_localstorage_size():
+    try:
+        all_data = localS.getAll()
+        if not all_data:
+            return 0.0
+        total_size_bytes = sum(len(json.dumps(key, ensure_ascii=False)) + len(json.dumps(value, ensure_ascii=False)) for key, value in all_data.items()) # Assuming UTF-8 for simplicity, as actual localStorage encoding is complex
+        return total_size_bytes / (1024 * 1024)  # Размер в МБ
+    except Exception as e:
+        # st.write(f"Error calculating localStorage size: {e}") # Optional: for debugging
+        return -1 # Indicate error or unavailability
 
 def main():
     load_app_settings()
