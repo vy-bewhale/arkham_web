@@ -51,16 +51,28 @@ def initialize_session_state():
         st.session_state.auto_refresh_enabled = False
         st.session_state.auto_refresh_interval = 60
         st.session_state.initialized = True
-    if ('arkham_monitor' not in st.session_state or st.session_state.arkham_monitor is None) and \
-       (st.session_state.get('api_key') or os.getenv("ARKHAM_API_KEY")):
-        api_key = st.session_state.get('api_key') or os.getenv("ARKHAM_API_KEY")
+
+    # --- ГАРАНТИРОВАННО создаём monitor, если его нет, а ключ есть ---
+    api_key_present = st.session_state.get('api_key') or os.getenv("ARKHAM_API_KEY")
+
+    if ('arkham_monitor' not in st.session_state or st.session_state.get('arkham_monitor') is None) and api_key_present:
+        current_api_key = st.session_state.get('api_key') or os.getenv("ARKHAM_API_KEY")
         try:
-            st.session_state.arkham_monitor = arkham_service.create_monitor(api_key)
+            st.session_state.arkham_monitor = arkham_service.create_monitor(current_api_key)
+            if st.session_state.arkham_monitor is not None:
+                st.session_state.api_key_loaded = True
+            else:
+                st.session_state.api_key_loaded = False
+                st.session_state.error_message = "Не удалось инициализировать Arkham Monitor (create_monitor вернул None)."
         except Exception as e:
             st.session_state.arkham_monitor = None
-        if st.session_state.arkham_monitor is None:
             st.session_state.api_key_loaded = False
-            st.session_state.error_message = "Не удалось инициализировать Arkham Monitor. Проверьте API ключ или настройки сети."
+            st.session_state.error_message = f"Ошибка при создании ArkhamMonitor: {e}"
+    elif not api_key_present:
+        st.session_state.arkham_monitor = None
+        st.session_state.api_key_loaded = False
+        if not st.session_state.get('error_message'):
+             st.session_state.error_message = "ARKHAM_API_KEY не найден."
 
 def load_app_settings():
     if "app_state_loaded" not in st.session_state:
@@ -90,22 +102,46 @@ def save_app_settings():
         pass
 
 def load_arkham_cache(arkham_monitor):
-    if "arkham_cache_loaded" not in st.session_state and arkham_monitor is not None:
-        try:
-            raw_cache = localS.getItem("arkham_cache")
-            if raw_cache:
-                cache_dict = json.loads(raw_cache)
-                arkham_monitor.load_full_cache_state(cache_dict)
+    should_attempt_load = ("arkham_cache_loaded" not in st.session_state or not st.session_state.get("arkham_cache_loaded", False)) and arkham_monitor is not None
+    if not should_attempt_load:
+        return
+    if 'arkham_cache_loaded' in st.session_state:
+        del st.session_state['arkham_cache_loaded']
+    try:
+        raw_cache = localS.getItem("arkham_alert_cache")
+        if raw_cache:
+            cache_dict = json.loads(raw_cache)
+            arkham_monitor.load_full_cache_state(cache_dict)
+            st.session_state.known_tokens = arkham_monitor.get_known_token_symbols()
+            st.session_state.known_addresses = arkham_monitor.get_known_address_names()
+
+            token_cache_data = cache_dict.get('token_cache', {})
+            address_cache_data = cache_dict.get('address_cache', {})
+
+            st.session_state.detailed_token_info = token_cache_data.get('symbol_to_ids', {})
+            st.session_state.detailed_address_info = address_cache_data.get('name_to_ids', {})
+            
+            if st.session_state.detailed_token_info is None: st.session_state.detailed_token_info = {}
+            if st.session_state.detailed_address_info is None: st.session_state.detailed_address_info = {}
+
+            if st.session_state.known_tokens or st.session_state.known_addresses:
+                st.session_state.cache_initialized_flag = True
+            else:
+                st.session_state.cache_initialized_flag = False
             st.session_state.arkham_cache_loaded = True
-        except Exception as e:
-            st.session_state.arkham_cache_loaded = True
+        else:
+            st.session_state.cache_initialized_flag = False
+            st.session_state.arkham_cache_loaded = False
+    except Exception as e: 
+        st.session_state.cache_initialized_flag = False
+        st.session_state.arkham_cache_loaded = False
 
 def save_arkham_cache(arkham_monitor):
     if arkham_monitor is not None:
         try:
             cache_to_save = arkham_monitor.get_full_cache_state()
-            localS.setItem("arkham_cache", json.dumps(cache_to_save, ensure_ascii=False))
-        except Exception:
+            localS.setItem("arkham_alert_cache", json.dumps(cache_to_save, ensure_ascii=False))
+        except Exception as e: 
             pass
 
 def handle_populate_cache_button():
@@ -127,49 +163,45 @@ def handle_populate_cache_button():
             st.session_state.known_tokens = []
             st.session_state.known_addresses = []
             st.session_state.cache_initialized_flag = False
-            st.session_state.detailed_token_info = {} # Возвращаем
-            st.session_state.detailed_address_info = {} # Возвращаем
+            st.session_state.detailed_token_info = {}
+            st.session_state.detailed_address_info = {}
         else:
-            st.session_state.known_tokens = tokens # Возвращаем
-            st.session_state.known_addresses = addresses # Возвращаем
+            st.session_state.known_tokens = tokens
+            st.session_state.known_addresses = addresses
             st.session_state.cache_initialized_flag = True
-            st.session_state.error_message = None # Очищаем предыдущие ошибки
-            st.success(f"Кеш успешно обновлен. Загружено {len(tokens)} токенов и {len(addresses)} адресов.") # Возвращаем исходное сообщение
+            st.session_state.error_message = None
+            st.success(f"Кеш успешно обновлен. Загружено {len(tokens)} токенов и {len(addresses)} адресов.")
 
-            # Получаем детализированную информацию
-            token_details, token_err = arkham_service.get_detailed_token_info(st.session_state.arkham_monitor)
-            if token_err:
-                st.warning(f"Не удалось получить детали по токенам: {token_err}")
-                st.session_state.detailed_token_info = {} # Возвращаем
-            else:
-                st.session_state.detailed_token_info = token_details if token_details is not None else {} # Возвращаем
+            # Теперь, когда arkham_monitor обновлен, извлекаем из него полные данные для session_state
+            if st.session_state.arkham_monitor:
+                try:
+                    full_cache_state = st.session_state.arkham_monitor.get_full_cache_state()
+                    st.session_state.detailed_token_info = full_cache_state.get('token_cache', {}).get('symbol_to_ids', {})
+                    st.session_state.detailed_address_info = full_cache_state.get('address_cache', {}).get('name_to_ids', {})
+                    
+                    # Убедимся, что это словари, если get вернул None или ключи отсутствовали
+                    if st.session_state.detailed_token_info is None: 
+                        st.session_state.detailed_token_info = {}
+                    if st.session_state.detailed_address_info is None: 
+                        st.session_state.detailed_address_info = {}
+                except Exception as e:
+                    st.warning(f"Ошибка при получении полного состояния кеша из монитора: {e}")
+                    st.session_state.detailed_token_info = {} # Сброс в случае ошибки
+                    st.session_state.detailed_address_info = {}
             
-            address_details, addr_err = arkham_service.get_detailed_address_info(st.session_state.arkham_monitor)
-            if addr_err:
-                st.warning(f"Не удалось получить детали по адресам: {addr_err}")
-                st.session_state.detailed_address_info = {} # Возвращаем
-            else:
-                st.session_state.detailed_address_info = address_details if address_details is not None else {} # Возвращаем
-            # Сохраняем кеш Arkham только после успешного обновления
             save_arkham_cache(st.session_state.arkham_monitor)
-        # st.rerun() # Убираем rerun
     else:
         st.session_state.error_message = "Arkham Monitor не инициализирован. Невозможно обновить кеш."
-        # st.rerun() # Убираем rerun
 
 def handle_auto_refresh_toggle():
     """Обработчик для переключателя автообновления (просто переключает флаг)."""
-    # Логика запуска/остановки потока удалена
-    # Состояние auto_refresh_enabled меняется автоматически виджетом st.toggle
-    pass # Теперь эта функция может быть пустой или ее можно убрать, если on_change не нужен 
-         # Оставим пока pass для ясности, что on_change был, но логика изменилась.
-         # Или можно убрать on_change из st.toggle ниже.
+    pass
 
 def _fetch_and_update_table():
     """Получает транзакции и обновляет session_state."""
     if not st.session_state.arkham_monitor:
         st.session_state.error_message = "Arkham Monitor не инициализирован. Невозможно выполнить запрос."
-        st.session_state.transactions_df = pd.DataFrame() # Очищаем старые результаты
+        st.session_state.transactions_df = pd.DataFrame()
         st.toast("Ошибка: Монитор Arkham не инициализирован.", icon="🚨")
         return
 
@@ -210,23 +242,27 @@ def _fetch_and_update_table():
             if set(st.session_state.get('known_addresses', [])) != set(updated_addresses):
                 st.session_state.known_addresses = updated_addresses
 
-            token_details, token_err = arkham_service.get_detailed_token_info(st.session_state.arkham_monitor)
-            if token_err:
-                st.warning(f"Не удалось обновить детали по токенам после поиска: {token_err}")
-            else:
-                st.session_state.detailed_token_info = token_details if token_details is not None else {}
-            
-            address_details, addr_err = arkham_service.get_detailed_address_info(st.session_state.arkham_monitor)
-            if addr_err:
-                st.warning(f"Не удалось обновить детали по адресам после поиска: {addr_err}")
-            else:
-                st.session_state.detailed_address_info = address_details if address_details is not None else {}
+            # Теперь, когда arkham_monitor обновлен (потенциально fetch_transactions добавляет новые сущности),
+            # извлекаем из него полные данные для session_state
+            if st.session_state.arkham_monitor: # Дополнительная проверка здесь не помешает, хотя выше уже есть
+                try:
+                    full_cache_state = st.session_state.arkham_monitor.get_full_cache_state()
+                    st.session_state.detailed_token_info = full_cache_state.get('token_cache', {}).get('symbol_to_ids', {})
+                    st.session_state.detailed_address_info = full_cache_state.get('address_cache', {}).get('name_to_ids', {})
+
+                    # Убедимся, что это словари, если get вернул None или ключи отсутствовали
+                    if st.session_state.detailed_token_info is None: 
+                        st.session_state.detailed_token_info = {}
+                    if st.session_state.detailed_address_info is None: 
+                        st.session_state.detailed_address_info = {}
+                except Exception as e:
+                    st.warning(f"Ошибка при получении полного состояния кеша из монитора после поиска: {e}")
+                    st.session_state.detailed_token_info = {} # Сброс в случае ошибки
+                    st.session_state.detailed_address_info = {}
             
             save_arkham_cache(st.session_state.arkham_monitor)
-            # Устанавливаем флаг, что кеш был инициализирован/обновлен, если он не был установлен
             if not st.session_state.cache_initialized_flag and (updated_tokens or updated_addresses):
                  st.session_state.cache_initialized_flag = True
-
 
         if st.session_state.transactions_df.empty:
             st.info("Транзакции по заданным фильтрам не найдены.")
@@ -235,8 +271,7 @@ def _fetch_and_update_table():
 
 def handle_fetch_transactions_button():
     """Обработчик для кнопки "Найти Транзакции"."""
-    _fetch_and_update_table() # Просто вызываем общую функцию
-    # st.rerun() # Убираем rerun
+    _fetch_and_update_table()
 
 def render_sidebar():
     """Отрисовывает боковую панель."""
@@ -248,7 +283,6 @@ def render_sidebar():
             key='lookback_cache_input', 
             help="Период для первоначальной загрузки данных в кеш (адреса, токены)."
         )
-        # Value убран
         st.number_input(
             "Мин. USD для кеша", 
             min_value=0.0,
@@ -257,7 +291,6 @@ def render_sidebar():
             format="%.0f",
             help="Минимальная сумма транзакции в USD для наполнения кеша."
         )
-        # Value убран
         st.number_input(
             "Лимит для кеша", 
             min_value=1,
@@ -269,9 +302,7 @@ def render_sidebar():
         st.button("Загрузить/Обновить кеш", on_click=handle_populate_cache_button, key="populate_cache_btn")
     
     with st.sidebar.expander("Фильтры Транзакций", expanded=True):
-        # Изменяем пропорции колонок на [2, 1]
         cols = st.columns([2, 1])
-        # Value убран
         cols[0].number_input(
             "Мин. сумма USD", 
             min_value=0.0, 
@@ -286,7 +317,6 @@ def render_sidebar():
             key='lookback_query_input', 
             help="Временной период для основного запроса транзакций."
         )
-        # Все фильтры и кнопка поиска теперь внутри этого экспандера
         st.multiselect(
             "Фильтр по токенам", 
             options=st.session_state.get('known_tokens', []),
@@ -305,7 +335,6 @@ def render_sidebar():
             key='to_address_names_multiselect',
             help="Выберите имена/адреса получателей. Список обновляется после загрузки/обновления кеша."
         )
-        # Value убран
         st.number_input(
             "Лимит транзакций в результате", 
             min_value=1, 
@@ -320,7 +349,6 @@ def render_sidebar():
         st.toggle(
             "Включить", 
             key='auto_refresh_enabled', 
-            # on_change=handle_auto_refresh_toggle, # Убираем on_change, т.к. логика теперь в main
             help="Автоматически обновлять таблицу транзакций. ВНИМАНИЕ: Приложение будет неактивно во время ожидания интервала."
         )
         st.number_input(
@@ -329,7 +357,6 @@ def render_sidebar():
             step=10, 
             key='auto_refresh_interval', 
             help="Как часто обновлять таблицу (минимум 10 секунд).",
-            # disabled=st.session_state.get('auto_refresh_running', False) # Убираем disabled, т.к. нет auto_refresh_running
         )
 
 def render_main_content():
@@ -364,9 +391,11 @@ def render_main_content():
                 st.info("Кеш еще не инициализирован. Пожалуйста, загрузите его, используя опцию в сайдбаре.")
             else:
                 detailed_address_info = st.session_state.get('detailed_address_info', {})
-                total_detailed_addresses_ids = sum(detailed_address_info.values()) if detailed_address_info else 0
+                total_detailed_addresses_ids = sum(len(ids) for ids in detailed_address_info.values() if isinstance(ids, list))
+                
                 detailed_token_info = st.session_state.get('detailed_token_info', {})
-                total_detailed_tokens_ids = sum(len(ids) for ids in detailed_token_info.values()) if detailed_token_info else 0
+                total_detailed_tokens_ids = sum(len(ids) for ids in detailed_token_info.values() if isinstance(ids, list))
+                
                 st.write(f"Уникальных имен/адресов в кеше: {len(known_addresses_list)} (связанных ID: {total_detailed_addresses_ids})")
                 st.write(f"Уникальных символов токенов в кеше: {len(known_tokens_list)} (связанных ID: {total_detailed_tokens_ids})")
                 if not known_addresses_list and not known_tokens_list:
@@ -383,9 +412,10 @@ def render_main_content():
                 st.info("Список известных адресов пуст. Загрузите или обновите кеш из сайдбара.")
             else:
                 data_for_addresses_df = []
-                detailed_address_info = st.session_state.get('detailed_address_info', {})
+                detailed_address_info_tab = st.session_state.get('detailed_address_info', {})
                 for name in known_addresses_list:
-                    count = detailed_address_info.get(name, 0)
+                    ids_list = detailed_address_info_tab.get(name, [])
+                    count = len(ids_list) if isinstance(ids_list, list) else 0
                     data_for_addresses_df.append({"Адрес/Имя": name, "Кол-во связанных ID": count})
                 df_addresses = pd.DataFrame(data_for_addresses_df)
                 st.dataframe(df_addresses, use_container_width=True, height=300)
@@ -396,19 +426,19 @@ def render_main_content():
                 st.info("Список известных токенов пуст. Загрузите или обновите кеш из сайдбара.")
             else:
                 data_for_tokens_df = []
-                detailed_token_info = st.session_state.get('detailed_token_info', {})
+                detailed_token_info_tab = st.session_state.get('detailed_token_info', {})
                 for symbol in known_tokens_list:
-                    ids_set = detailed_token_info.get(symbol, set())
-                    ids_str = ", ".join(sorted(list(ids_set)))
-                    count_ids = len(ids_set)
-                    data_for_tokens_df.append({"Символ Токена": symbol, "ID Токенов": ids_str, "Кол-во ID": count_ids})
+                    ids_list = detailed_token_info_tab.get(symbol, [])
+                    count_ids = len(ids_list) if isinstance(ids_list, list) else 0
+                    data_for_tokens_df.append({"Символ Токена": symbol, "Кол-во связанных ID": count_ids})
                 df_tokens = pd.DataFrame(data_for_tokens_df)
                 st.dataframe(
                     df_tokens, 
                     use_container_width=True, 
                     height=300,
                     column_config={
-                        "ID Токенов": st.column_config.TextColumn(width="large")
+                        # Обновляем label для колонки, если необходимо (старый ID Токенов мог быть неоднозначным)
+                        # "Кол-во связанных ID" уже используется в append, так что Streamlit должен подхватить
                     }
                 )
 
@@ -417,38 +447,42 @@ def get_localstorage_size():
         all_data = localS.getAll()
         if not all_data:
             return 0.0
-        total_size_bytes = sum(len(json.dumps(key, ensure_ascii=False)) + len(json.dumps(value, ensure_ascii=False)) for key, value in all_data.items()) # Assuming UTF-8 for simplicity, as actual localStorage encoding is complex
+        total_size_bytes = sum(len(json.dumps(key, ensure_ascii=False)) + len(json.dumps(value, ensure_ascii=False)) for key, value in all_data.items())
         return total_size_bytes / (1024 * 1024)  # Размер в МБ
     except Exception as e:
-        # st.write(f"Error calculating localStorage size: {e}") # Optional: for debugging
-        return -1 # Indicate error or unavailability
+        return -1
 
 def main():
     load_app_settings()
+    
     initialize_session_state()
+
     if st.session_state.get('arkham_monitor') is not None:
         load_arkham_cache(st.session_state.arkham_monitor)
+    
     if st.session_state.get('error_message') and not st.session_state.get('arkham_monitor'):
         st.error(st.session_state.error_message)
-        st.session_state.error_message = None
+        st.session_state.error_message = None 
         st.stop()
-    elif not st.session_state.get('api_key_loaded', False):
-        current_error = st.session_state.get('error_message', "Критическая ошибка: ARKHAM_API_KEY не найден или недействителен. Проверьте .env файл.")
+    elif not st.session_state.get('api_key_loaded', False) and not st.session_state.get('arkham_monitor'):
+        current_error = st.session_state.get('error_message', "Критическая ошибка: ARKHAM_API_KEY не найден или недействителен, или монитор не создан.")
         st.error(current_error)
-        st.session_state.error_message = None
+        st.session_state.error_message = None 
         st.stop()
+
     render_sidebar()
     render_main_content()
+
     if st.session_state.get('auto_refresh_enabled', False):
         interval = st.session_state.get('auto_refresh_interval', 60)
-        placeholder = st.empty()
+        placeholder = st.empty() 
         placeholder.info(f"Автообновление таблицы через {interval} сек...")
-        time.sleep(interval)
+        time.sleep(interval) 
         placeholder.empty()
         _fetch_and_update_table()
         st.rerun()
+    
     save_app_settings()
 
 if __name__ == "__main__":
-    # load_custom_css("assets/style.css") # Убираем отсюда, если он был здесь ранее глобально
     main() 
