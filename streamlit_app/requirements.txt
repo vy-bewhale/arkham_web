@@ -1,9 +1,0 @@
-streamlit
-pandas
-python-dotenv
-# Путь к локальной библиотеке arkham_client
-# Убедитесь, что путь корректен относительно директории streamlit_app,
-# где будет запускаться pip install -r requirements.txt
-# Если arkham_client лежит на одном уровне с streamlit_app (например, ../arkham_client)
-# -e ../arkham_client 
-arkham_client @ git+https://github.com/vy-bewhale/arkham_client.git 

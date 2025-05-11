@@ -1,0 +1,5 @@
+streamlit-local-storage
+streamlit
+pandas
+python-dotenv
+arkham_client @ git+https://github.com/vy-bewhale/arkham_client.git 
