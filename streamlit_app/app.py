@@ -372,13 +372,18 @@ def render_main_content():
     transactions_df = st.session_state.get('transactions_df', pd.DataFrame())
     if not transactions_df.empty:
         with st.expander("Найденные транзакции", expanded=True):
+            # Определяем колонки для отображения (все, кроме 'TxID', если она есть)
+            cols_to_display = [col for col in transactions_df.columns if col != 'TxID']
+            df_display = transactions_df[cols_to_display] # Создаем DataFrame для отображения
+
             st.dataframe(
-                transactions_df, 
+                df_display, # Используем DataFrame без TxID
                 use_container_width=True,
                 height=600,
                 column_config={
                     "Откуда": st.column_config.TextColumn(width="medium"),
                     "Куда": st.column_config.TextColumn(width="medium")
+                    # Можно добавить настройки для других колонок при необходимости
                 }
             )
     with st.expander("Информация о кеше (адреса и токены)", expanded=False):
