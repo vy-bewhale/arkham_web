@@ -6,6 +6,7 @@ import os
 import time # Добавляем импорт time
 from dotenv import load_dotenv
 import arkham_service # Модуль с логикой Arkham
+import telegram_service # НОВЫЙ импорт для Telegram
 from typing import List, Dict, Any, Tuple, Optional, Set # Нужен typing для подсказок типов
 from streamlit_local_storage import LocalStorage
 import json
@@ -19,7 +20,12 @@ WHITELIST_KEYS = [
     'cache_initialized_flag', 'known_tokens', 'known_addresses',
     'detailed_token_info', 'detailed_address_info',
     'api_key_loaded', 'error_message', 'api_params_debug',
-    'initialized'
+    'initialized',
+    # Новые ключи для Telegram
+    'telegram_chat_id',
+    'telegram_alerts_enabled',
+    'alert_history',
+    'telegram_bot_token' # Новый ключ для токена
 ]
 
 localS = LocalStorage()
@@ -50,6 +56,13 @@ def initialize_session_state():
         st.session_state.limit_query_input = 50
         st.session_state.auto_refresh_enabled = False
         st.session_state.auto_refresh_interval = 60
+        
+        # Новые значения по умолчанию для Telegram
+        st.session_state.telegram_chat_id = ''
+        st.session_state.telegram_alerts_enabled = False
+        st.session_state.alert_history = {}
+        st.session_state.telegram_bot_token = '' # Инициализируем токен пустой строкой
+        
         st.session_state.initialized = True
 
     # --- ГАРАНТИРОВАННО создаём monitor, если его нет, а ключ есть ---
@@ -73,6 +86,7 @@ def initialize_session_state():
         st.session_state.api_key_loaded = False
         if not st.session_state.get('error_message'):
              st.session_state.error_message = "ARKHAM_API_KEY не найден."
+             
 
 def load_app_settings():
     if "app_state_loaded" not in st.session_state:
@@ -83,22 +97,47 @@ def load_app_settings():
                 if state_dict.get("state_version") == 1:
                     for k in WHITELIST_KEYS:
                         if k in state_dict:
-                            st.session_state[k] = state_dict[k]
+                            # Специальная обработка для alert_history (десериализация JSON)
+                            if k == 'alert_history':
+                                try:
+                                    loaded_history = state_dict[k]
+                                    # Доп. проверка, что это словарь
+                                    if isinstance(loaded_history, dict):
+                                        st.session_state[k] = loaded_history
+                                    else:
+                                        print(f"Warning: Loaded alert_history is not a dict, resetting.")
+                                        st.session_state[k] = {}
+                                except json.JSONDecodeError:
+                                    print(f"Warning: Could not decode alert_history from localStorage, resetting.")
+                                    st.session_state[k] = {}
+                            else:
+                                st.session_state[k] = state_dict[k]
             st.session_state.app_state_loaded = True
         except Exception as e:
+            # В случае любой ошибки при загрузке - не падать, а просто использовать дефолты
+            print(f"Error loading app settings from localStorage: {e}")
             st.session_state.app_state_loaded = True
 
 def save_app_settings():
     try:
         state_to_save = {k: st.session_state.get(k) for k in WHITELIST_KEYS if k in st.session_state}
+        # Специальная обработка для словарей с set внутри (если такие будут)
         for k in ['detailed_token_info', 'detailed_address_info']:
             if k in state_to_save and isinstance(state_to_save[k], dict):
                 for subk, v in state_to_save[k].items():
                     if isinstance(v, set):
                         state_to_save[k][subk] = list(v)
         state_to_save["state_version"] = 1
+        
+        # alert_history уже должен быть сериализуемым словарем
+        # Дополнительная проверка на всякий случай
+        if 'alert_history' in state_to_save and not isinstance(state_to_save['alert_history'], dict):
+            print("Warning: alert_history is not a dict during save, saving empty dict instead.")
+            state_to_save['alert_history'] = {}
+            
         localS.setItem("app_state", json.dumps(state_to_save, ensure_ascii=False))
-    except Exception:
+    except Exception as e:
+        print(f"Error saving app settings to localStorage: {e}")
         pass
 
 def load_arkham_cache(arkham_monitor):
@@ -143,6 +182,45 @@ def save_arkham_cache(arkham_monitor):
             localS.setItem("arkham_alert_cache", json.dumps(cache_to_save, ensure_ascii=False))
         except Exception as e: 
             pass
+
+MAX_ALERT_HISTORY_SIZE = 100
+
+def load_alert_history() -> Dict[str, Dict[str, Any]]:
+    """Загружает историю алертов из localStorage."""
+    try:
+        raw_state = localS.getItem("app_state")
+        if raw_state:
+            state_dict = json.loads(raw_state)
+            history = state_dict.get('alert_history')
+            if isinstance(history, dict):
+                return history
+            else:
+                print("Warning: alert_history in localStorage is not a dict. Resetting.")
+                return {}
+        else:
+            return {}
+    except Exception as e:
+        print(f"Error loading alert_history from localStorage: {e}. Resetting.")
+        return {}
+
+def save_alert_history(history: Dict[str, Dict[str, Any]]):
+    """Сохраняет историю алертов в localStorage, применяя ротацию."""
+    # Ротация: Удаляем самые старые записи, если их > MAX_ALERT_HISTORY_SIZE
+    if len(history) > MAX_ALERT_HISTORY_SIZE:
+        # Сортируем по last_attempt_time (старые первыми)
+        sorted_hashes = sorted(history.keys(), key=lambda k: history[k].get('last_attempt_time', 0))
+        num_to_remove = len(history) - MAX_ALERT_HISTORY_SIZE
+        hashes_to_remove = sorted_hashes[:num_to_remove]
+        for h in hashes_to_remove:
+            del history[h]
+            
+    # Сохраняем текущее состояние session_state (включая обновленную history)
+    try:
+        # Обновляем историю в session_state перед полным сохранением
+        st.session_state.alert_history = history 
+        save_app_settings() # Эта функция сохраняет ВСЕ настройки из WHITELIST_KEYS
+    except Exception as e:
+        print(f"Error saving alert history: {e}")
 
 def handle_populate_cache_button():
     """Обработчик для кнопки обновления кеша Arkham."""
@@ -197,8 +275,82 @@ def handle_auto_refresh_toggle():
     """Обработчик для переключателя автообновления (просто переключает флаг)."""
     pass
 
+def _process_telegram_alerts(transactions_df: pd.DataFrame):
+    """Обрабатывает отправку Telegram алертов для новых транзакций."""
+    if not st.session_state.get('telegram_alerts_enabled', False):
+        return # Алерты выключены
+        
+    # Получаем токен и chat_id из session_state
+    bot_token = st.session_state.get('telegram_bot_token', '')
+    chat_id = st.session_state.get('telegram_chat_id', '')
+    
+    if not bot_token or not chat_id:
+        # Дополнительная проверка, хотя UI не должен позволить включить алерты без них
+        print("Warning: Telegram Bot Token or Chat ID is missing, cannot send alerts.")
+        return
+        
+    alert_history = load_alert_history()
+    history_updated = False
+    current_time = time.time()
+
+    # Проверяем наличие колонки TxID
+    if 'TxID' not in transactions_df.columns:
+        st.warning("Колонка 'TxID' отсутствует в DataFrame транзакций. Алерты Telegram не будут отправлены.")
+        return
+        
+    for index, row in transactions_df.iterrows():
+        tx_hash = row.get('TxID')
+        
+        # Пропускаем строки без валидного TxID
+        if not tx_hash or pd.isna(tx_hash) or tx_hash == 'N/A':
+            continue
+            
+        tx_hash_str = str(tx_hash)
+        alert_info = alert_history.get(tx_hash_str)
+        
+        should_send = False
+        is_retry = False
+        current_attempt = 0
+        
+        if alert_info is None:
+            # Новая транзакция
+            should_send = True
+            current_attempt = 1
+        elif alert_info.get('status') in ["pending", "error"]:
+            # Повторная попытка
+            last_attempt_time = alert_info.get('last_attempt_time', 0)
+            attempts_done = alert_info.get('attempt', 0)
+            if attempts_done < 5 and (current_time - last_attempt_time >= 60): # Прошла минута
+                should_send = True
+                is_retry = True
+                current_attempt = attempts_done + 1
+                
+        if should_send:
+            message_html = telegram_service.format_telegram_message(row)
+            if message_html:
+                success = telegram_service.send_telegram_alert(bot_token, chat_id, message_html)
+                
+                new_status = "success" if success else ("error" if current_attempt >= 5 else "pending")
+                sent_time = current_time if success else (alert_info.get('sent_time') if alert_info else None)
+                
+                alert_history[tx_hash_str] = {
+                    'status': new_status,
+                    'attempt': current_attempt,
+                    'last_attempt_time': current_time,
+                    'sent_time': sent_time
+                }
+                history_updated = True
+                
+                # Небольшая пауза между отправками, чтобы не перегружать API
+                time.sleep(0.1)
+            else:
+                print(f"Failed to format message for TxID: {tx_hash_str}")
+
+    if history_updated:
+        save_alert_history(alert_history)
+
 def _fetch_and_update_table():
-    """Получает транзакции и обновляет session_state."""
+    """Получает транзакции, обновляет session_state и обрабатывает алерты."""
     if not st.session_state.arkham_monitor:
         st.session_state.error_message = "Arkham Monitor не инициализирован. Невозможно выполнить запрос."
         st.session_state.transactions_df = pd.DataFrame()
@@ -232,6 +384,15 @@ def _fetch_and_update_table():
         st.session_state.transactions_df = df if df is not None else pd.DataFrame()
         st.session_state.error_message = None 
 
+        if not st.session_state.transactions_df.empty:
+             # --- ОБРАБОТКА TELEGRAM АЛЕРТОВ --- 
+            try:
+                _process_telegram_alerts(st.session_state.transactions_df)
+            except Exception as e:
+                st.error(f"Ошибка при обработке Telegram алертов: {e}")
+                print(f"Error processing Telegram alerts: {e}")
+            # --- КОНЕЦ ОБРАБОТКИ TELEGRAM АЛЕРТОВ ---
+
         if st.session_state.arkham_monitor:
             updated_tokens = st.session_state.arkham_monitor.get_known_token_symbols()
             updated_addresses = st.session_state.arkham_monitor.get_known_address_names()
@@ -242,25 +403,24 @@ def _fetch_and_update_table():
             if set(st.session_state.get('known_addresses', [])) != set(updated_addresses):
                 st.session_state.known_addresses = updated_addresses
 
-            # Теперь, когда arkham_monitor обновлен (потенциально fetch_transactions добавляет новые сущности),
-            # извлекаем из него полные данные для session_state
-            if st.session_state.arkham_monitor: # Дополнительная проверка здесь не помешает, хотя выше уже есть
+            if st.session_state.arkham_monitor:
                 try:
                     full_cache_state = st.session_state.arkham_monitor.get_full_cache_state()
                     st.session_state.detailed_token_info = full_cache_state.get('token_cache', {}).get('symbol_to_ids', {})
                     st.session_state.detailed_address_info = full_cache_state.get('address_cache', {}).get('name_to_ids', {})
 
-                    # Убедимся, что это словари, если get вернул None или ключи отсутствовали
                     if st.session_state.detailed_token_info is None: 
                         st.session_state.detailed_token_info = {}
                     if st.session_state.detailed_address_info is None: 
                         st.session_state.detailed_address_info = {}
                 except Exception as e:
                     st.warning(f"Ошибка при получении полного состояния кеша из монитора после поиска: {e}")
-                    st.session_state.detailed_token_info = {} # Сброс в случае ошибки
+                    st.session_state.detailed_token_info = {} 
                     st.session_state.detailed_address_info = {}
             
+            # Сохраняем кеш Arkham после возможного обновления в fetch_transactions
             save_arkham_cache(st.session_state.arkham_monitor)
+            
             if not st.session_state.cache_initialized_flag and (updated_tokens or updated_addresses):
                  st.session_state.cache_initialized_flag = True
 
@@ -345,6 +505,34 @@ def render_sidebar():
         )
         st.button("Найти Транзакции", on_click=handle_fetch_transactions_button, key="fetch_transactions_btn")
 
+    with st.sidebar.expander("Настройки алертов Telegram"):
+        # Получаем текущие значения из session_state
+        current_bot_token = st.session_state.get('telegram_bot_token', '')
+        current_chat_id = st.session_state.get('telegram_chat_id', '')
+
+        st.text_input(
+            "Telegram Bot Token",
+            key='telegram_bot_token',
+            type="password", # Скрываем токен
+            help="Токен вашего Telegram бота. Его можно получить у @BotFather."
+        )
+        
+        st.text_input(
+            "Telegram Chat ID",
+            key='telegram_chat_id',
+            help="ID чата или группы в Telegram для отправки алертов.",
+        )
+        
+        # Переключатель активен только если введены И токен, И Chat ID
+        alerts_can_be_enabled = bool(current_bot_token) and bool(current_chat_id)
+        
+        st.toggle(
+            "Включить алерты Telegram",
+            key='telegram_alerts_enabled',
+            help="Отправлять уведомления о новых транзакциях в Telegram.",
+            disabled=not alerts_can_be_enabled
+        )
+
     with st.sidebar.expander("Автоматическое Обновление"):
         st.toggle(
             "Включить", 
@@ -369,23 +557,72 @@ def render_main_content():
     else:
         st.error("Приложение не может функционировать без API ключа или инициализации монитора.")
         return
-    transactions_df = st.session_state.get('transactions_df', pd.DataFrame())
-    if not transactions_df.empty:
+        
+    # Работаем с копией DataFrame, чтобы не изменять оригинал в session_state лишний раз
+    transactions_df_original = st.session_state.get('transactions_df', pd.DataFrame())
+    
+    if not transactions_df_original.empty:
+        transactions_df_with_status = transactions_df_original.copy()
+        
+        # --- Добавляем колонку статуса Telegram --- 
+        alert_history = load_alert_history()
+        alerts_enabled = st.session_state.get('telegram_alerts_enabled', False)
+        
+        # Определяем функцию для получения иконки
+        def get_status_icon(tx_id, history, enabled):
+            if not tx_id or pd.isna(tx_id) or tx_id == 'N/A':
+                return "(нет TxID)" # Возвращаем текст, если TxID некорректен
+            if not enabled:
+                 return "➖" # Алерты выключены (используем ➖ вместо 끄)
+                 
+            tx_id_str = str(tx_id)
+            info = history.get(tx_id_str)
+            if info:
+                status = info.get('status')
+                attempt = info.get('attempt', 0)
+                MAX_ATTEMPTS = 5
+                if status == "success":
+                    return "✅"
+                elif status == "failed":
+                    return "⏳" if attempt < MAX_ATTEMPTS else "❌"
+                elif status == "pending":
+                    return "⏳"
+                else: # Неизвестный статус
+                    return "❓"
+            else:
+                # Нет в истории
+                return "" # Или можно "➖", если хотите явный статус
+
+        # Применяем функцию к transactions_df_with_status (где есть TxID)
+        if 'TxID' in transactions_df_with_status.columns:
+            transactions_df_with_status['Статус Telegram'] = transactions_df_with_status['TxID'].apply(
+                lambda txid: get_status_icon(txid, alert_history, alerts_enabled)
+            )
+        else:
+            print("Warning: TxID column not found in transactions_df_with_status, cannot add Telegram status icons.")
+            transactions_df_with_status['Статус Telegram'] = "(нет TxID)"
+        # --- Конец добавления колонки статуса --- 
+            
         with st.expander("Найденные транзакции", expanded=True):
-            # Определяем колонки для отображения (все, кроме 'TxID', если она есть)
-            cols_to_display = [col for col in transactions_df.columns if col != 'TxID']
-            df_display = transactions_df[cols_to_display] # Создаем DataFrame для отображения
+            # Определяем колонки для отображения *после* добавления статуса
+            cols_to_display = [col for col in transactions_df_with_status.columns if col != 'TxID']
+            df_display = transactions_df_with_status[cols_to_display]
 
             st.dataframe(
-                df_display, # Используем DataFrame без TxID
+                df_display, 
                 use_container_width=True,
                 height=600,
                 column_config={
                     "Откуда": st.column_config.TextColumn(width="medium"),
-                    "Куда": st.column_config.TextColumn(width="medium")
-                    # Можно добавить настройки для других колонок при необходимости
+                    "Куда": st.column_config.TextColumn(width="medium"),
+                    "Статус Telegram": st.column_config.TextColumn(width="small") 
                 }
             )
+            
+    else: # Если transactions_df_original пустой
+        if st.session_state.get('initialized'): # Показываем инфо только если инициализация прошла
+             st.info("Транзакции по заданным фильтрам не найдены или еще не были запрошены.")
+
     with st.expander("Информация о кеше (адреса и токены)", expanded=False):
         known_tokens_list = st.session_state.get('known_tokens', [])
         known_addresses_list = st.session_state.get('known_addresses', [])
