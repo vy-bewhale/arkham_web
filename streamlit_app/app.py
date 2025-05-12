@@ -298,7 +298,10 @@ def _process_telegram_alerts(transactions_df: pd.DataFrame):
         st.warning("Колонка 'TxID' отсутствует в DataFrame транзакций. Алерты Telegram не будут отправлены.")
         return
         
-    for index, row in transactions_df.iterrows():
+    # РАЗВОРАЧИВАЕМ DataFrame, чтобы итерировать от старых к новым
+    transactions_df_reversed = transactions_df.iloc[::-1]
+    
+    for index, row in transactions_df_reversed.iterrows():
         tx_hash = row.get('TxID')
         
         # Пропускаем строки без валидного TxID
