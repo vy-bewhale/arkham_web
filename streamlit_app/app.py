@@ -30,36 +30,24 @@ WHITELIST_KEYS = [
 
 localS = LocalStorage()
 
-# MAX_ALERT_HISTORY_SIZE будет удалена, так как размер теперь динамический
-# MAX_ALERT_HISTORY_SIZE = 100 
-
-# Константа для максимального количества попыток отправки алерта (используется в _get_rotation_priority_key)
 APP_MAX_ALERT_ATTEMPTS = 5
 
 def _get_rotation_priority_key(item_data: Dict[str, Any]):
-    """Возвращает ключ сортировки для ротации истории алертов.
-    Приоритет удаления (меньшее значение = раньше удаляется):
-    0: Безнадежные ошибки (status error/pending, attempt >= APP_MAX_ALERT_ATTEMPTS)
-    1: Другие ошибки/pending (status error/pending, attempt < APP_MAX_ALERT_ATTEMPTS) или неизвестный статус
-    2: Успешные алерты (status success)
-    Внутри каждой группы сортировка по времени (самые старые первыми).
-    """
     status = item_data.get('status')
     attempt = item_data.get('attempt', 0)
     
     if status in ["error", "pending"]:
         if attempt >= APP_MAX_ALERT_ATTEMPTS:
-            priority_group = 0 # Безнадежные
+            priority_group = 0
         else:
-            priority_group = 1 # Обычные ошибки/pending
+            priority_group = 1
         time_value = item_data.get('last_attempt_time', 0)
     elif status == "success":
-        priority_group = 2 # Успешные - удаляются в последнюю очередь
-        time_value = item_data.get('sent_time', 0) # Для успешных используем sent_time
-    else: # Неизвестный или отсутствующий статус
-        priority_group = 1 # Обрабатываем как обычную ошибку/pending для безопасности
-        time_value = item_data.get('last_attempt_time', 0) # Или time.time() если last_attempt_time нет?
-                                                            # Оставим 0, чтобы быть согласованным.
+        priority_group = 2
+        time_value = item_data.get('sent_time', 0)
+    else:
+        priority_group = 1
+        time_value = item_data.get('last_attempt_time', 0)
     return (priority_group, time_value)
 
 def initialize_session_state():
@@ -88,16 +76,12 @@ def initialize_session_state():
         st.session_state.limit_query_input = 50
         st.session_state.auto_refresh_enabled = False
         st.session_state.auto_refresh_interval = 60
-        
-        # Новые значения по умолчанию для Telegram
         st.session_state.telegram_chat_id = ''
         st.session_state.telegram_alerts_enabled = False
         st.session_state.alert_history = {}
-        st.session_state.telegram_bot_token = '' # Инициализируем токен пустой строкой
-        
+        st.session_state.telegram_bot_token = ''
         st.session_state.initialized = True
 
-    # --- ГАРАНТИРОВАННО создаём monitor, если его нет, а ключ есть ---
     api_key_present = st.session_state.get('api_key') or os.getenv("ARKHAM_API_KEY")
 
     if ('arkham_monitor' not in st.session_state or st.session_state.get('arkham_monitor') is None) and api_key_present:
@@ -123,17 +107,15 @@ def initialize_session_state():
 def load_app_settings():
     if "app_state_loaded" not in st.session_state:
         try:
-            raw_state = localS.getItem("app_state")
+            raw_state = localS.getItem("app_state") # Убран key
             if raw_state:
                 state_dict = json.loads(raw_state)
                 if state_dict.get("state_version") == 1:
                     for k in WHITELIST_KEYS:
                         if k in state_dict:
-                            # Специальная обработка для alert_history (десериализация JSON)
                             if k == 'alert_history':
                                 try:
                                     loaded_history = state_dict[k]
-                                    # Доп. проверка, что это словарь
                                     if isinstance(loaded_history, dict):
                                         st.session_state[k] = loaded_history
                                     else:
@@ -146,28 +128,22 @@ def load_app_settings():
                                 st.session_state[k] = state_dict[k]
             st.session_state.app_state_loaded = True
         except Exception as e:
-            # В случае любой ошибки при загрузке - не падать, а просто использовать дефолты
             print(f"Error loading app settings from localStorage: {e}")
             st.session_state.app_state_loaded = True
 
 def save_app_settings():
     try:
         state_to_save = {k: st.session_state.get(k) for k in WHITELIST_KEYS if k in st.session_state}
-        # Специальная обработка для словарей с set внутри (если такие будут)
         for k in ['detailed_token_info', 'detailed_address_info']:
             if k in state_to_save and isinstance(state_to_save[k], dict):
                 for subk, v in state_to_save[k].items():
                     if isinstance(v, set):
                         state_to_save[k][subk] = list(v)
         state_to_save["state_version"] = 1
-        
-        # alert_history уже должен быть сериализуемым словарем
-        # Дополнительная проверка на всякий случай
         if 'alert_history' in state_to_save and not isinstance(state_to_save['alert_history'], dict):
             print("Warning: alert_history is not a dict during save, saving empty dict instead.")
             state_to_save['alert_history'] = {}
-            
-        localS.setItem("app_state", json.dumps(state_to_save, ensure_ascii=False))
+        localS.setItem("app_state", json.dumps(state_to_save, ensure_ascii=False), key="app_settings_storage")
     except Exception as e:
         print(f"Error saving app settings to localStorage: {e}")
         pass
@@ -179,22 +155,18 @@ def load_arkham_cache(arkham_monitor):
     if 'arkham_cache_loaded' in st.session_state:
         del st.session_state['arkham_cache_loaded']
     try:
-        raw_cache = localS.getItem("arkham_alert_cache")
+        raw_cache = localS.getItem("arkham_alert_cache") # Убран key
         if raw_cache:
             cache_dict = json.loads(raw_cache)
             arkham_monitor.load_full_cache_state(cache_dict)
             st.session_state.known_tokens = arkham_monitor.get_known_token_symbols()
             st.session_state.known_addresses = arkham_monitor.get_known_address_names()
-
             token_cache_data = cache_dict.get('token_cache', {})
             address_cache_data = cache_dict.get('address_cache', {})
-
             st.session_state.detailed_token_info = token_cache_data.get('symbol_to_ids', {})
             st.session_state.detailed_address_info = address_cache_data.get('name_to_ids', {})
-            
             if st.session_state.detailed_token_info is None: st.session_state.detailed_token_info = {}
             if st.session_state.detailed_address_info is None: st.session_state.detailed_address_info = {}
-
             if st.session_state.known_tokens or st.session_state.known_addresses:
                 st.session_state.cache_initialized_flag = True
             else:
@@ -204,6 +176,7 @@ def load_arkham_cache(arkham_monitor):
             st.session_state.cache_initialized_flag = False
             st.session_state.arkham_cache_loaded = False
     except Exception as e: 
+        print(f"Error loading arkham cache from localStorage: {e}")
         st.session_state.cache_initialized_flag = False
         st.session_state.arkham_cache_loaded = False
 
@@ -211,72 +184,60 @@ def save_arkham_cache(arkham_monitor):
     if arkham_monitor is not None:
         try:
             cache_to_save = arkham_monitor.get_full_cache_state()
-            localS.setItem("arkham_alert_cache", json.dumps(cache_to_save, ensure_ascii=False))
+            localS.setItem("arkham_alert_cache", json.dumps(cache_to_save, ensure_ascii=False), key="arkham_cache_storage")
         except Exception as e: 
+            print(f"Error saving arkham cache to localStorage: {e}")
             pass
 
 def load_alert_history() -> Dict[str, Dict[str, Any]]:
-    """Загружает историю алертов из localStorage."""
     try:
-        raw_state = localS.getItem("app_state")
+        raw_state = localS.getItem("app_state") # Убран key
         if raw_state:
             state_dict = json.loads(raw_state)
             history = state_dict.get('alert_history')
             if isinstance(history, dict):
                 return history
             else:
-                print("Warning: alert_history in localStorage is not a dict. Resetting.")
+                print("Warning: alert_history in localStorage (specific load) is not a dict. Resetting.")
                 return {}
         else:
             return {}
     except Exception as e:
-        print(f"Error loading alert_history from localStorage: {e}. Resetting.")
+        print(f"Error loading alert_history from localStorage (specific load): {e}. Resetting.")
         return {}
 
 def save_alert_history(history: Dict[str, Dict[str, Any]]):
-    """Сохраняет историю алертов в localStorage, применяя умную ротацию.
-    Размер истории динамически определяется как 2 * limit_query_input.
-    """
     limit_q_input = st.session_state.get('limit_query_input', 50) 
     max_history_size = 2 * limit_q_input
-
     history_copy_for_saving = history.copy()
-
     if len(history_copy_for_saving) > max_history_size:
         sorted_keys_for_removal = sorted(
             history_copy_for_saving.keys(),
             key=lambda k: _get_rotation_priority_key(history_copy_for_saving[k])
         )
-        
         num_to_remove = len(history_copy_for_saving) - max_history_size
         hashes_to_remove = sorted_keys_for_removal[:num_to_remove]
-        
         for h_key in hashes_to_remove:
             if h_key in history_copy_for_saving:
                  del history_copy_for_saving[h_key]
-            
     try:
         st.session_state.alert_history = history_copy_for_saving 
-        save_app_settings()
+        save_app_settings() # Это вызовет localS.setItem с key="app_settings_storage"
     except Exception as e:
+        print(f"Error in save_alert_history when calling save_app_settings: {e}")
         pass
 
 def handle_populate_cache_button():
-    """Обработчик для кнопки обновления кеша Arkham."""
     if st.session_state.arkham_monitor:
-        # Получаем значения из session_state, куда их записали виджеты по ключам
         lookback = st.session_state.lookback_cache_input
         min_usd = st.session_state.min_usd_cache_input
         limit = st.session_state.limit_cache_input
-        
         with st.spinner("Обновление кеша данных Arkham..."):
             tokens, addresses, error = arkham_service.populate_arkham_cache(
                 st.session_state.arkham_monitor, lookback, min_usd, limit
             )
-        
         if error:
             st.session_state.error_message = error
-            # Очищаем списки, если была ошибка, чтобы не показывать старые данные
             st.session_state.known_tokens = []
             st.session_state.known_addresses = []
             st.session_state.cache_initialized_flag = False
@@ -288,94 +249,63 @@ def handle_populate_cache_button():
             st.session_state.cache_initialized_flag = True
             st.session_state.error_message = None
             st.success(f"Кеш успешно обновлен. Загружено {len(tokens)} токенов и {len(addresses)} адресов.")
-
-            # Теперь, когда arkham_monitor обновлен, извлекаем из него полные данные для session_state
             if st.session_state.arkham_monitor:
                 try:
                     full_cache_state = st.session_state.arkham_monitor.get_full_cache_state()
                     st.session_state.detailed_token_info = full_cache_state.get('token_cache', {}).get('symbol_to_ids', {})
                     st.session_state.detailed_address_info = full_cache_state.get('address_cache', {}).get('name_to_ids', {})
-                    
-                    # Убедимся, что это словари, если get вернул None или ключи отсутствовали
                     if st.session_state.detailed_token_info is None: 
                         st.session_state.detailed_token_info = {}
                     if st.session_state.detailed_address_info is None: 
                         st.session_state.detailed_address_info = {}
                 except Exception as e:
                     st.warning(f"Ошибка при получении полного состояния кеша из монитора: {e}")
-                    st.session_state.detailed_token_info = {} # Сброс в случае ошибки
+                    st.session_state.detailed_token_info = {} 
                     st.session_state.detailed_address_info = {}
-            
             save_arkham_cache(st.session_state.arkham_monitor)
     else:
         st.session_state.error_message = "Arkham Monitor не инициализирован. Невозможно обновить кеш."
 
 def handle_auto_refresh_toggle():
-    """Обработчик для переключателя автообновления (просто переключает флаг)."""
     pass
 
 def _process_telegram_alerts(transactions_df: pd.DataFrame):
-    """Обрабатывает отправку Telegram алертов для новых транзакций."""
     if not st.session_state.get('telegram_alerts_enabled', False):
         return
-        
     bot_token = st.session_state.get('telegram_bot_token', '')
     chat_id = st.session_state.get('telegram_chat_id', '')
-    
     if not bot_token or not chat_id:
         return
-        
     alert_history = load_alert_history()
-    
     history_updated = False
     current_time = time.time()
-
     if 'TxID' not in transactions_df.columns or transactions_df.empty:
         return
-
     transactions_df_to_process = transactions_df.iloc[::-1]
-
     current_cycle_alert_history = alert_history.copy()
-
     for index, row in transactions_df_to_process.iterrows():
         tx_hash = row.get('TxID')
-        
         if not tx_hash or pd.isna(tx_hash) or tx_hash == 'N/A':
             continue
-            
         tx_hash_str = str(tx_hash)
         alert_info = current_cycle_alert_history.get(tx_hash_str) 
-        
         should_send = False
-        is_retry = False
         current_attempt = 0
-        reason_to_send = ""
-        
         if alert_info is None:
             should_send = True
             current_attempt = 1
-            reason_to_send = "new_transaction"
         elif alert_info.get('status') in ["pending", "error"]:
             last_attempt_time = alert_info.get('last_attempt_time', 0)
             attempts_done = alert_info.get('attempt', 0) 
             if attempts_done < APP_MAX_ALERT_ATTEMPTS and (current_time - last_attempt_time >= 60):
                 should_send = True
-                is_retry = True
                 current_attempt = attempts_done + 1
-                reason_to_send = f"retry_after_{alert_info.get('status')}"
-            else:
-                reason_to_send = f"no_retry_needed_status_{alert_info.get('status')}_attempt_{attempts_done}"
-        else:
-            reason_to_send = f"already_processed_status_{alert_info.get('status')}"
-            
         if should_send:
             message_html = telegram_service.format_telegram_message(row)
             if message_html:
                 success = telegram_service.send_telegram_alert(bot_token, chat_id, message_html)
-                
                 new_status = "success" if success else ("error" if current_attempt >= APP_MAX_ALERT_ATTEMPTS else "pending")
                 sent_time_val = current_time if success else (alert_info.get('sent_time') if alert_info and 'sent_time' in alert_info else None) 
-                
                 current_cycle_alert_history[tx_hash_str] = {
                     'status': new_status,
                     'attempt': current_attempt,
@@ -384,25 +314,18 @@ def _process_telegram_alerts(transactions_df: pd.DataFrame):
                     'original_timestamp_from_data': row.get('time')
                 }
                 history_updated = True
-                
                 time.sleep(0.1)
-            else:
-                pass
-
     if history_updated:
         save_alert_history(current_cycle_alert_history)
 
 def _fetch_and_update_table():
-    """Получает транзакции, обновляет session_state и обрабатывает алерты."""
     if not st.session_state.arkham_monitor:
         st.session_state.error_message = "Arkham Monitor не инициализирован. Невозможно выполнить запрос."
         st.session_state.transactions_df = pd.DataFrame()
         st.toast("Ошибка: Монитор Arkham не инициализирован.", icon="🚨")
         return
-
     if not st.session_state.cache_initialized_flag:
         st.warning("Внимание: Кеш адресов и токенов не был инициализирован или обновлен. Фильтрация по именам и токенам может быть неэффективной.")
-
     filter_params = {
         'min_usd': st.session_state.min_usd_query_input,
         'lookback': st.session_state.lookback_query_input,
@@ -411,14 +334,11 @@ def _fetch_and_update_table():
         'to_address_names': st.session_state.to_address_names_multiselect
     }
     query_limit = st.session_state.limit_query_input
-
     with st.spinner("Запрос транзакций..."):
         df, error, api_params_debug = arkham_service.fetch_transactions(
             st.session_state.arkham_monitor, filter_params, query_limit
         )
-    
     st.session_state.api_params_debug = api_params_debug 
-    
     if error:
         st.session_state.error_message = error
         st.session_state.transactions_df = pd.DataFrame() 
@@ -426,32 +346,24 @@ def _fetch_and_update_table():
     else:
         st.session_state.transactions_df = df if df is not None else pd.DataFrame()
         st.session_state.error_message = None 
-
         if not st.session_state.transactions_df.empty:
-             # --- ОБРАБОТКА TELEGRAM АЛЕРТОВ --- 
             try:
                 _process_telegram_alerts(st.session_state.transactions_df)
             except Exception as e:
                 st.error(f"Ошибка при обработке Telegram алертов: {e}")
                 print(f"Error processing Telegram alerts: {e}")
-            # --- КОНЕЦ ОБРАБОТКИ TELEGRAM АЛЕРТОВ ---
-
         if st.session_state.arkham_monitor:
             updated_tokens = st.session_state.arkham_monitor.get_known_token_symbols()
             updated_addresses = st.session_state.arkham_monitor.get_known_address_names()
-
             if set(st.session_state.get('known_tokens', [])) != set(updated_tokens):
                 st.session_state.known_tokens = updated_tokens
-            
             if set(st.session_state.get('known_addresses', [])) != set(updated_addresses):
                 st.session_state.known_addresses = updated_addresses
-
             if st.session_state.arkham_monitor:
                 try:
                     full_cache_state = st.session_state.arkham_monitor.get_full_cache_state()
                     st.session_state.detailed_token_info = full_cache_state.get('token_cache', {}).get('symbol_to_ids', {})
                     st.session_state.detailed_address_info = full_cache_state.get('address_cache', {}).get('name_to_ids', {})
-
                     if st.session_state.detailed_token_info is None: 
                         st.session_state.detailed_token_info = {}
                     if st.session_state.detailed_address_info is None: 
@@ -460,25 +372,16 @@ def _fetch_and_update_table():
                     st.warning(f"Ошибка при получении полного состояния кеша из монитора после поиска: {e}")
                     st.session_state.detailed_token_info = {} 
                     st.session_state.detailed_address_info = {}
-            
-            # Сохраняем кеш Arkham после возможного обновления в fetch_transactions
             save_arkham_cache(st.session_state.arkham_monitor)
-            
             if not st.session_state.cache_initialized_flag and (updated_tokens or updated_addresses):
                  st.session_state.cache_initialized_flag = True
-
         if st.session_state.transactions_df.empty:
             st.info("Транзакции по заданным фильтрам не найдены.")
-        else:
-            pass
 
 def handle_fetch_transactions_button():
-    """Обработчик для кнопки "Найти Транзакции"."""
     _fetch_and_update_table()
 
 def render_sidebar():
-    """Отрисовывает боковую панель."""
-
     with st.sidebar.expander("Настройки API и Кеша", expanded=False):
         st.selectbox(
             "Период для кеша", 
@@ -549,26 +452,20 @@ def render_sidebar():
         st.button("Найти Транзакции", on_click=handle_fetch_transactions_button, key="fetch_transactions_btn")
 
     with st.sidebar.expander("Настройки алертов Telegram"):
-        # Получаем текущие значения из session_state
         current_bot_token = st.session_state.get('telegram_bot_token', '')
         current_chat_id = st.session_state.get('telegram_chat_id', '')
-
         st.text_input(
             "Telegram Bot Token",
             key='telegram_bot_token',
-            type="password", # Скрываем токен
+            type="password",
             help="Токен вашего Telegram бота. Его можно получить у @BotFather."
         )
-        
         st.text_input(
             "Telegram Chat ID",
             key='telegram_chat_id',
             help="ID чата или группы в Telegram для отправки алертов.",
         )
-        
-        # Переключатель активен только если введены И токен, И Chat ID
         alerts_can_be_enabled = bool(current_bot_token) and bool(current_chat_id)
-        
         st.toggle(
             "Включить алерты Telegram",
             key='telegram_alerts_enabled',
@@ -600,21 +497,16 @@ def render_main_content():
     else:
         st.error("Приложение не может функционировать без API ключа или инициализации монитора.")
         return
-        
     transactions_df_original = st.session_state.get('transactions_df', pd.DataFrame())
-    
     if not transactions_df_original.empty:
         transactions_df_with_status = transactions_df_original.copy()
-        
         alert_history = load_alert_history()
         alerts_enabled = st.session_state.get('telegram_alerts_enabled', False)
-        
         def get_status_icon(tx_id, history, enabled):
             if not tx_id or pd.isna(tx_id) or tx_id == 'N/A':
                 return "(нет TxID)"
             if not enabled:
                  return "➖"
-                 
             tx_id_str = str(tx_id)
             info = history.get(tx_id_str)
             if info:
@@ -622,39 +514,32 @@ def render_main_content():
                 attempt = info.get('attempt', 0)
                 if status == "success":
                     return "✅"
-                elif status == "failed": # Это должно быть "error" или "pending" если не success
+                elif status == "failed":
                     return "⏳" if attempt < APP_MAX_ALERT_ATTEMPTS else "❌"
                 elif status == "pending":
                     return "⏳"
-                elif status == "error": # Добавляем явную проверку на error
+                elif status == "error":
                     return "⏳" if attempt < APP_MAX_ALERT_ATTEMPTS else "❌"
                 else:
                     return "❓"
             else:
                 return ""
-
         alert_column_name = "Alert" 
-
         if 'TxID' in transactions_df_with_status.columns:
             transactions_df_with_status[alert_column_name] = transactions_df_with_status['TxID'].apply(
                 lambda txid: get_status_icon(txid, alert_history, alerts_enabled)
             )
         else:
             transactions_df_with_status[alert_column_name] = "(нет TxID)"
-            
         with st.expander("Найденные транзакции", expanded=True):
             cols_in_df = transactions_df_with_status.columns.tolist()
-            
             ordered_cols = []
             if alert_column_name in cols_in_df:
                 ordered_cols.append(alert_column_name)
-            
             for col in cols_in_df:
                 if col != alert_column_name:
                     ordered_cols.append(col)
-            
             df_display = transactions_df_with_status[ordered_cols]
-
             st.dataframe(
                 df_display, 
                 use_container_width=True,
@@ -662,10 +547,8 @@ def render_main_content():
                 column_config={
                     "Откуда": st.column_config.TextColumn(width="medium"),
                     "Куда": st.column_config.TextColumn(width="medium"),
-                   # alert_column_name: st.column_config.TextColumn(width="small") # ИЗМЕНЕНО: обратно на "small"
                 }
             )
-            
     else:
         if st.session_state.get('initialized'):
              st.info("Транзакции по заданным фильтрам не найдены или еще не были запрошены.")
@@ -681,10 +564,8 @@ def render_main_content():
             else:
                 detailed_address_info = st.session_state.get('detailed_address_info', {})
                 total_detailed_addresses_ids = sum(len(ids) for ids in detailed_address_info.values() if isinstance(ids, list))
-                
                 detailed_token_info = st.session_state.get('detailed_token_info', {})
                 total_detailed_tokens_ids = sum(len(ids) for ids in detailed_token_info.values() if isinstance(ids, list))
-                
                 st.write(f"Уникальных имен/адресов в кеше: {len(known_addresses_list)} (связанных ID: {total_detailed_addresses_ids})")
                 st.write(f"Уникальных символов токенов в кеше: {len(known_tokens_list)} (связанных ID: {total_detailed_tokens_ids})")
                 if not known_addresses_list and not known_tokens_list:
@@ -725,30 +606,25 @@ def render_main_content():
                     df_tokens, 
                     use_container_width=True, 
                     height=300,
-                    column_config={
-                        # Обновляем label для колонки, если необходимо (старый ID Токенов мог быть неоднозначным)
-                        # "Кол-во связанных ID" уже используется в append, так что Streamlit должен подхватить
-                    }
+                    column_config={}
                 )
 
 def get_localstorage_size():
     try:
-        all_data = localS.getAll()
+        all_data = localS.getAll() # Убран key
         if not all_data:
             return 0.0
         total_size_bytes = sum(len(json.dumps(key, ensure_ascii=False)) + len(json.dumps(value, ensure_ascii=False)) for key, value in all_data.items())
-        return total_size_bytes / (1024 * 1024)  # Размер в МБ
+        return total_size_bytes / (1024 * 1024)
     except Exception as e:
+        print(f"Error getting localStorage size: {e}")
         return -1
 
 def main():
     load_app_settings()
-    
     initialize_session_state()
-
     if st.session_state.get('arkham_monitor') is not None:
         load_arkham_cache(st.session_state.arkham_monitor)
-    
     if st.session_state.get('error_message') and not st.session_state.get('arkham_monitor'):
         st.error(st.session_state.error_message)
         st.session_state.error_message = None 
