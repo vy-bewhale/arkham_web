@@ -19,33 +19,36 @@ def send_telegram_alert_sim(bot_token: str, chat_id: str, message_html: str) -> 
     return True # Всегда успешно для симуляции
 
 def save_alert_history_sim(history: Dict[str, Dict[str, Any]], current_cycle: int, limit_query_input_sim: int) -> Dict[str, Dict[str, Any]]:
-    """Сохраняет историю алертов, применяя ротацию (адаптировано)."""
+    """Сохраняет историю алертов, применяя ротацию (адаптировано для симуляции).
+    Использует ту же логику сортировки, что и в app.py.
+    """
     
-    max_history_size = limit_query_input_sim
+    # ИСПРАВЛЕНИЕ: Размер истории должен быть 2 * лимит запроса, как в app.py
+    max_history_size = 2 * limit_query_input_sim 
     
-    if len(history) > max_history_size:
-        # print(f"    [Cycle {current_cycle} SAVE_HISTORY] History size {len(history)} > {max_history_size}. Rotating...")
+    # Копируем историю, чтобы не изменять оригинал напрямую, если он используется где-то еще в цикле симуляции до "сохранения"
+    history_copy = history.copy()
+    
+    if len(history_copy) > max_history_size:
+        # print(f"    [Cycle {current_cycle} SAVE_HISTORY_SIM] History size {len(history_copy)} > {max_history_size}. Rotating...")
         
-        # Модифицированная сортировка: сначала не-success, потом success; внутри каждой группы по времени
-        sorted_hashes = sorted(
-            history.keys(), 
-            key=lambda k: (
-                1 if history[k].get('status') == 'success' else 0, # Статус success "тяжелее"
-                history[k].get('last_attempt_time', 0) # Затем по времени
-            )
+        sorted_keys_for_removal = sorted(
+            history_copy.keys(), 
+            key=lambda k: _get_rotation_priority_key_sim(history_copy[k])
         )
         
-        num_to_remove = len(history) - max_history_size
-        hashes_to_remove = sorted_hashes[:num_to_remove]
-        # print(f"        [Cycle {current_cycle} SAVE_HISTORY] Candidates for removal (sorted by preference): {hashes_to_remove}")
-        for h_to_remove in hashes_to_remove:
-            # print(f"        [Cycle {current_cycle} SAVE_HISTORY] Removing by rotation: {h_to_remove} (Status: {history.get(h_to_remove, {}).get('status')}, LastAttemptTime: {history.get(h_to_remove, {}).get('last_attempt_time')})")
-            if h_to_remove in history:
-                 del history[h_to_remove]
-            else:
-                print(f"        [Cycle {current_cycle} SAVE_HISTORY] WARNING: Hash {h_to_remove} not found during rotation.")
-    
-    return history
+        num_to_remove = len(history_copy) - max_history_size
+        hashes_to_remove = sorted_keys_for_removal[:num_to_remove]
+        
+        # print(f"    [Cycle {current_cycle} SAVE_HISTORY_SIM] Hashes to remove by rotation: {hashes_to_remove}")
+
+        for h_key in hashes_to_remove:
+            if h_key in history_copy:
+                # details = history_copy.get(h_key, {})
+                # print(f"        [SAVE_HISTORY_SIM] Removing: {h_key}, Priority: {_get_rotation_priority_key_sim(details)}")
+                del history_copy[h_key]
+            
+    return history_copy # Возвращаем измененную копию
 
 def process_telegram_alerts_sim(
     transactions_df: pd.DataFrame, 

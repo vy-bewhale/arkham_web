@@ -332,23 +332,24 @@ def _process_telegram_alerts(transactions_df: pd.DataFrame):
     chat_id = st.session_state.get('telegram_chat_id', '')
     
     if not bot_token or not chat_id:
-        print("Warning: Telegram Bot Token or Chat ID is missing, cannot send alerts.")
+        # print("Warning: Telegram Bot Token or Chat ID is missing, cannot send alerts.")
+        # Вместо принта можно показывать однократное st.warning, если это предпочтительнее
         return
         
-    # 1. Загружаем историю ОДИН РАЗ в начале
     alert_history = load_alert_history()
-    # 2. Убираем явное создание копии, работаем с alert_history
     history_updated = False
     current_time = time.time()
 
-    if 'TxID' not in transactions_df.columns:
-        st.warning("Колонка 'TxID' отсутствует в DataFrame транзакций. Алерты Telegram не будут отправлены.")
+    if 'TxID' not in transactions_df.columns or transactions_df.empty:
+        # st.warning("Колонка 'TxID' отсутствует в DataFrame транзакций или DataFrame пуст. Алерты Telegram не будут отправлены.")
         return
-        
-    # Убираем разворот DataFrame
-    # transactions_df_reversed = transactions_df.iloc[::-1]
-    
-    for index, row in transactions_df.iterrows(): # Итерируем по оригинальному DataFrame
+
+    # РАЗВОРАЧИВАЕМ DataFrame, чтобы обрабатывать от старых к новым
+    transactions_df = transactions_df.iloc[::-1]
+
+    # print(f"_process_telegram_alerts: Processing {len(transactions_df)} transactions. History size: {len(alert_history)}") # DEBUG
+
+    for index, row in transactions_df.iterrows():
         tx_hash = row.get('TxID')
         
         if not tx_hash or pd.isna(tx_hash) or tx_hash == 'N/A':
