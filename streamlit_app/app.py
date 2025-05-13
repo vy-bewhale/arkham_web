@@ -189,23 +189,6 @@ def save_arkham_cache(arkham_monitor):
             print(f"Error saving arkham cache to localStorage: {e}")
             pass
 
-def load_alert_history() -> Dict[str, Dict[str, Any]]:
-    try:
-        raw_state = localS.getItem("app_state") # Убран key
-        if raw_state:
-            state_dict = json.loads(raw_state)
-            history = state_dict.get('alert_history')
-            if isinstance(history, dict):
-                return history
-            else:
-                print("Warning: alert_history in localStorage (specific load) is not a dict. Resetting.")
-                return {}
-        else:
-            return {}
-    except Exception as e:
-        print(f"Error loading alert_history from localStorage (specific load): {e}. Resetting.")
-        return {}
-
 def save_alert_history(history: Dict[str, Dict[str, Any]]):
     limit_q_input = st.session_state.get('limit_query_input', 50) 
     max_history_size = 2 * limit_q_input
@@ -276,13 +259,13 @@ def _process_telegram_alerts(transactions_df: pd.DataFrame):
     chat_id = st.session_state.get('telegram_chat_id', '')
     if not bot_token or not chat_id:
         return
-    alert_history = load_alert_history()
+    session_history = st.session_state.get('alert_history', {})
     history_updated = False
     current_time = time.time()
     if 'TxID' not in transactions_df.columns or transactions_df.empty:
         return
     transactions_df_to_process = transactions_df.iloc[::-1]
-    current_cycle_alert_history = alert_history.copy()
+    current_cycle_alert_history = session_history.copy()
     for index, row in transactions_df_to_process.iterrows():
         tx_hash = row.get('TxID')
         if not tx_hash or pd.isna(tx_hash) or tx_hash == 'N/A':
@@ -500,7 +483,7 @@ def render_main_content():
     transactions_df_original = st.session_state.get('transactions_df', pd.DataFrame())
     if not transactions_df_original.empty:
         transactions_df_with_status = transactions_df_original.copy()
-        alert_history = load_alert_history()
+        alert_history_for_status = st.session_state.get('alert_history', {})
         alerts_enabled = st.session_state.get('telegram_alerts_enabled', False)
         def get_status_icon(tx_id, history, enabled):
             if not tx_id or pd.isna(tx_id) or tx_id == 'N/A':
@@ -527,7 +510,7 @@ def render_main_content():
         alert_column_name = "Alert" 
         if 'TxID' in transactions_df_with_status.columns:
             transactions_df_with_status[alert_column_name] = transactions_df_with_status['TxID'].apply(
-                lambda txid: get_status_icon(txid, alert_history, alerts_enabled)
+                lambda txid: get_status_icon(txid, alert_history_for_status, alerts_enabled)
             )
         else:
             transactions_df_with_status[alert_column_name] = "(нет TxID)"
