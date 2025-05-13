@@ -30,6 +30,38 @@ WHITELIST_KEYS = [
 
 localS = LocalStorage()
 
+# MAX_ALERT_HISTORY_SIZE будет удалена, так как размер теперь динамический
+# MAX_ALERT_HISTORY_SIZE = 100 
+
+# Константа для максимального количества попыток отправки алерта (используется в _get_rotation_priority_key)
+APP_MAX_ALERT_ATTEMPTS = 5
+
+def _get_rotation_priority_key(item_data: Dict[str, Any]):
+    """Возвращает ключ сортировки для ротации истории алертов.
+    Приоритет удаления (меньшее значение = раньше удаляется):
+    0: Безнадежные ошибки (status error/pending, attempt >= APP_MAX_ALERT_ATTEMPTS)
+    1: Другие ошибки/pending (status error/pending, attempt < APP_MAX_ALERT_ATTEMPTS) или неизвестный статус
+    2: Успешные алерты (status success)
+    Внутри каждой группы сортировка по времени (самые старые первыми).
+    """
+    status = item_data.get('status')
+    attempt = item_data.get('attempt', 0)
+    
+    if status in ["error", "pending"]:
+        if attempt >= APP_MAX_ALERT_ATTEMPTS:
+            priority_group = 0 # Безнадежные
+        else:
+            priority_group = 1 # Обычные ошибки/pending
+        time_value = item_data.get('last_attempt_time', 0)
+    elif status == "success":
+        priority_group = 2 # Успешные - удаляются в последнюю очередь
+        time_value = item_data.get('sent_time', 0) # Для успешных используем sent_time
+    else: # Неизвестный или отсутствующий статус
+        priority_group = 1 # Обрабатываем как обычную ошибку/pending для безопасности
+        time_value = item_data.get('last_attempt_time', 0) # Или time.time() если last_attempt_time нет?
+                                                            # Оставим 0, чтобы быть согласованным.
+    return (priority_group, time_value)
+
 def initialize_session_state():
     if 'initialized' not in st.session_state:
         dotenv_path = os.path.join(os.path.dirname(__file__), '..', '.env') 
@@ -183,8 +215,6 @@ def save_arkham_cache(arkham_monitor):
         except Exception as e: 
             pass
 
-MAX_ALERT_HISTORY_SIZE = 100
-
 def load_alert_history() -> Dict[str, Dict[str, Any]]:
     """Загружает историю алертов из localStorage."""
     try:
@@ -204,21 +234,39 @@ def load_alert_history() -> Dict[str, Dict[str, Any]]:
         return {}
 
 def save_alert_history(history: Dict[str, Dict[str, Any]]):
-    """Сохраняет историю алертов в localStorage, применяя ротацию."""
-    # Ротация: Удаляем самые старые записи, если их > MAX_ALERT_HISTORY_SIZE
-    if len(history) > MAX_ALERT_HISTORY_SIZE:
-        # Сортируем по last_attempt_time (старые первыми)
-        sorted_hashes = sorted(history.keys(), key=lambda k: history[k].get('last_attempt_time', 0))
-        num_to_remove = len(history) - MAX_ALERT_HISTORY_SIZE
-        hashes_to_remove = sorted_hashes[:num_to_remove]
-        for h in hashes_to_remove:
-            del history[h]
+    """Сохраняет историю алертов в localStorage, применяя умную ротацию.
+    Размер истории динамически определяется как 2 * limit_query_input.
+    """
+    
+    # Динамический расчет максимального размера истории
+    # limit_query_input инициализируется значением 50 в initialize_session_state
+    limit_q_input = st.session_state.get('limit_query_input', 50) 
+    max_history_size = 2 * limit_q_input
+    
+    if len(history) > max_history_size:
+        # Сортируем ключи истории на основе приоритета и времени для удаления
+        # Элементы с меньшим значением priority_group и меньшим time_value удаляются первыми.
+        sorted_keys_for_removal = sorted(
+            history.keys(),
+            key=lambda k: _get_rotation_priority_key(history[k]) # Передаем значение history[k]
+        )
+        
+        num_to_remove = len(history) - max_history_size
+        hashes_to_remove = sorted_keys_for_removal[:num_to_remove]
+        
+        # print(f"[SAVE_HISTORY] Limit: {max_history_size}, Current: {len(history)}, To remove: {num_to_remove}")
+        # print(f"[SAVE_HISTORY] Hashes to remove: {hashes_to_remove}")
+
+        for h_key in hashes_to_remove:
+            # details = history.get(h_key, {})
+            # print(f"    [SAVE_HISTORY] Removing by rotation: {h_key}, Priority: {_get_rotation_priority_key(details)}")
+            if h_key in history: # Дополнительная проверка
+                 del history[h_key]
             
-    # Сохраняем текущее состояние session_state (включая обновленную history)
     try:
-        # Обновляем историю в session_state перед полным сохранением
+        # Обновляем историю в session_state ПЕРЕД вызовом save_app_settings
         st.session_state.alert_history = history 
-        save_app_settings() # Эта функция сохраняет ВСЕ настройки из WHITELIST_KEYS
+        save_app_settings() # Эта функция сохранит все ключи из WHITELIST_KEYS, включая обновленную alert_history
     except Exception as e:
         print(f"Error saving alert history: {e}")
 
@@ -280,50 +328,47 @@ def _process_telegram_alerts(transactions_df: pd.DataFrame):
     if not st.session_state.get('telegram_alerts_enabled', False):
         return # Алерты выключены
         
-    # Получаем токен и chat_id из session_state
     bot_token = st.session_state.get('telegram_bot_token', '')
     chat_id = st.session_state.get('telegram_chat_id', '')
     
     if not bot_token or not chat_id:
-        # Дополнительная проверка, хотя UI не должен позволить включить алерты без них
         print("Warning: Telegram Bot Token or Chat ID is missing, cannot send alerts.")
         return
         
+    # 1. Загружаем историю ОДИН РАЗ в начале
     alert_history = load_alert_history()
+    # 2. Убираем явное создание копии, работаем с alert_history
     history_updated = False
     current_time = time.time()
 
-    # Проверяем наличие колонки TxID
     if 'TxID' not in transactions_df.columns:
         st.warning("Колонка 'TxID' отсутствует в DataFrame транзакций. Алерты Telegram не будут отправлены.")
         return
         
-    # РАЗВОРАЧИВАЕМ DataFrame, чтобы итерировать от старых к новым
-    transactions_df_reversed = transactions_df.iloc[::-1]
+    # Убираем разворот DataFrame
+    # transactions_df_reversed = transactions_df.iloc[::-1]
     
-    for index, row in transactions_df_reversed.iterrows():
+    for index, row in transactions_df.iterrows(): # Итерируем по оригинальному DataFrame
         tx_hash = row.get('TxID')
         
-        # Пропускаем строки без валидного TxID
         if not tx_hash or pd.isna(tx_hash) or tx_hash == 'N/A':
             continue
             
         tx_hash_str = str(tx_hash)
-        alert_info = alert_history.get(tx_hash_str)
+        # 3. Проверяем в загруженной/обновляемой истории (теперь это alert_history)
+        alert_info = alert_history.get(tx_hash_str) 
         
         should_send = False
         is_retry = False
         current_attempt = 0
         
         if alert_info is None:
-            # Новая транзакция
             should_send = True
             current_attempt = 1
         elif alert_info.get('status') in ["pending", "error"]:
-            # Повторная попытка
             last_attempt_time = alert_info.get('last_attempt_time', 0)
-            attempts_done = alert_info.get('attempt', 0)
-            if attempts_done < 5 and (current_time - last_attempt_time >= 60): # Прошла минута
+            attempts_done = alert_info.get('attempt', 0) 
+            if attempts_done < 5 and (current_time - last_attempt_time >= 60):
                 should_send = True
                 is_retry = True
                 current_attempt = attempts_done + 1
@@ -334,8 +379,9 @@ def _process_telegram_alerts(transactions_df: pd.DataFrame):
                 success = telegram_service.send_telegram_alert(bot_token, chat_id, message_html)
                 
                 new_status = "success" if success else ("error" if current_attempt >= 5 else "pending")
-                sent_time = current_time if success else (alert_info.get('sent_time') if alert_info else None)
+                sent_time = current_time if success else (alert_info.get('sent_time') if alert_info and 'sent_time' in alert_info else None) 
                 
+                # 4. Обновляем alert_history
                 alert_history[tx_hash_str] = {
                     'status': new_status,
                     'attempt': current_attempt,
@@ -344,11 +390,11 @@ def _process_telegram_alerts(transactions_df: pd.DataFrame):
                 }
                 history_updated = True
                 
-                # Небольшая пауза между отправками, чтобы не перегружать API
                 time.sleep(0.1)
             else:
                 print(f"Failed to format message for TxID: {tx_hash_str}")
 
+    # 5. Если были изменения, СОХРАНЯЕМ обновленную alert_history
     if history_updated:
         save_alert_history(alert_history)
 
