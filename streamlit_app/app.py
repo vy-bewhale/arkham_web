@@ -237,38 +237,29 @@ def save_alert_history(history: Dict[str, Dict[str, Any]]):
     """Сохраняет историю алертов в localStorage, применяя умную ротацию.
     Размер истории динамически определяется как 2 * limit_query_input.
     """
-    
-    # Динамический расчет максимального размера истории
-    # limit_query_input инициализируется значением 50 в initialize_session_state
     limit_q_input = st.session_state.get('limit_query_input', 50) 
     max_history_size = 2 * limit_q_input
-    
-    if len(history) > max_history_size:
-        # Сортируем ключи истории на основе приоритета и времени для удаления
-        # Элементы с меньшим значением priority_group и меньшим time_value удаляются первыми.
+
+    history_copy_for_saving = history.copy()
+
+    if len(history_copy_for_saving) > max_history_size:
         sorted_keys_for_removal = sorted(
-            history.keys(),
-            key=lambda k: _get_rotation_priority_key(history[k]) # Передаем значение history[k]
+            history_copy_for_saving.keys(),
+            key=lambda k: _get_rotation_priority_key(history_copy_for_saving[k])
         )
         
-        num_to_remove = len(history) - max_history_size
+        num_to_remove = len(history_copy_for_saving) - max_history_size
         hashes_to_remove = sorted_keys_for_removal[:num_to_remove]
         
-        # print(f"[SAVE_HISTORY] Limit: {max_history_size}, Current: {len(history)}, To remove: {num_to_remove}")
-        # print(f"[SAVE_HISTORY] Hashes to remove: {hashes_to_remove}")
-
         for h_key in hashes_to_remove:
-            # details = history.get(h_key, {})
-            # print(f"    [SAVE_HISTORY] Removing by rotation: {h_key}, Priority: {_get_rotation_priority_key(details)}")
-            if h_key in history: # Дополнительная проверка
-                 del history[h_key]
+            if h_key in history_copy_for_saving:
+                 del history_copy_for_saving[h_key]
             
     try:
-        # Обновляем историю в session_state ПЕРЕД вызовом save_app_settings
-        st.session_state.alert_history = history 
-        save_app_settings() # Эта функция сохранит все ключи из WHITELIST_KEYS, включая обновленную alert_history
+        st.session_state.alert_history = history_copy_for_saving 
+        save_app_settings()
     except Exception as e:
-        print(f"Error saving alert history: {e}")
+        pass
 
 def handle_populate_cache_button():
     """Обработчик для кнопки обновления кеша Arkham."""
@@ -326,78 +317,80 @@ def handle_auto_refresh_toggle():
 def _process_telegram_alerts(transactions_df: pd.DataFrame):
     """Обрабатывает отправку Telegram алертов для новых транзакций."""
     if not st.session_state.get('telegram_alerts_enabled', False):
-        return # Алерты выключены
+        return
         
     bot_token = st.session_state.get('telegram_bot_token', '')
     chat_id = st.session_state.get('telegram_chat_id', '')
     
     if not bot_token or not chat_id:
-        # print("Warning: Telegram Bot Token or Chat ID is missing, cannot send alerts.")
-        # Вместо принта можно показывать однократное st.warning, если это предпочтительнее
         return
         
     alert_history = load_alert_history()
+    
     history_updated = False
     current_time = time.time()
 
     if 'TxID' not in transactions_df.columns or transactions_df.empty:
-        # st.warning("Колонка 'TxID' отсутствует в DataFrame транзакций или DataFrame пуст. Алерты Telegram не будут отправлены.")
         return
 
-    # РАЗВОРАЧИВАЕМ DataFrame, чтобы обрабатывать от старых к новым
-    transactions_df = transactions_df.iloc[::-1]
+    transactions_df_to_process = transactions_df.iloc[::-1]
 
-    # print(f"_process_telegram_alerts: Processing {len(transactions_df)} transactions. History size: {len(alert_history)}") # DEBUG
+    current_cycle_alert_history = alert_history.copy()
 
-    for index, row in transactions_df.iterrows():
+    for index, row in transactions_df_to_process.iterrows():
         tx_hash = row.get('TxID')
         
         if not tx_hash or pd.isna(tx_hash) or tx_hash == 'N/A':
             continue
             
         tx_hash_str = str(tx_hash)
-        # 3. Проверяем в загруженной/обновляемой истории (теперь это alert_history)
-        alert_info = alert_history.get(tx_hash_str) 
+        alert_info = current_cycle_alert_history.get(tx_hash_str) 
         
         should_send = False
         is_retry = False
         current_attempt = 0
+        reason_to_send = ""
         
         if alert_info is None:
             should_send = True
             current_attempt = 1
+            reason_to_send = "new_transaction"
         elif alert_info.get('status') in ["pending", "error"]:
             last_attempt_time = alert_info.get('last_attempt_time', 0)
             attempts_done = alert_info.get('attempt', 0) 
-            if attempts_done < 5 and (current_time - last_attempt_time >= 60):
+            if attempts_done < APP_MAX_ALERT_ATTEMPTS and (current_time - last_attempt_time >= 60):
                 should_send = True
                 is_retry = True
                 current_attempt = attempts_done + 1
-                
+                reason_to_send = f"retry_after_{alert_info.get('status')}"
+            else:
+                reason_to_send = f"no_retry_needed_status_{alert_info.get('status')}_attempt_{attempts_done}"
+        else:
+            reason_to_send = f"already_processed_status_{alert_info.get('status')}"
+            
         if should_send:
             message_html = telegram_service.format_telegram_message(row)
             if message_html:
                 success = telegram_service.send_telegram_alert(bot_token, chat_id, message_html)
                 
-                new_status = "success" if success else ("error" if current_attempt >= 5 else "pending")
-                sent_time = current_time if success else (alert_info.get('sent_time') if alert_info and 'sent_time' in alert_info else None) 
+                new_status = "success" if success else ("error" if current_attempt >= APP_MAX_ALERT_ATTEMPTS else "pending")
+                sent_time_val = current_time if success else (alert_info.get('sent_time') if alert_info and 'sent_time' in alert_info else None) 
                 
-                # 4. Обновляем alert_history
-                alert_history[tx_hash_str] = {
+                current_cycle_alert_history[tx_hash_str] = {
                     'status': new_status,
                     'attempt': current_attempt,
                     'last_attempt_time': current_time,
-                    'sent_time': sent_time
+                    'sent_time': sent_time_val,
+                    'original_timestamp_from_data': row.get('time')
                 }
                 history_updated = True
                 
                 time.sleep(0.1)
             else:
-                print(f"Failed to format message for TxID: {tx_hash_str}")
+                pass
 
-    # 5. Если были изменения, СОХРАНЯЕМ обновленную alert_history
     if history_updated:
-        save_alert_history(alert_history)
+        save_alert_history(current_cycle_alert_history)
 
 def _fetch_and_update_table():
     """Получает транзакции, обновляет session_state и обрабатывает алерты."""
@@ -608,55 +601,59 @@ def render_main_content():
         st.error("Приложение не может функционировать без API ключа или инициализации монитора.")
         return
         
-    # Работаем с копией DataFrame, чтобы не изменять оригинал в session_state лишний раз
     transactions_df_original = st.session_state.get('transactions_df', pd.DataFrame())
     
     if not transactions_df_original.empty:
         transactions_df_with_status = transactions_df_original.copy()
         
-        # --- Добавляем колонку статуса Telegram --- 
         alert_history = load_alert_history()
         alerts_enabled = st.session_state.get('telegram_alerts_enabled', False)
         
-        # Определяем функцию для получения иконки
         def get_status_icon(tx_id, history, enabled):
             if not tx_id or pd.isna(tx_id) or tx_id == 'N/A':
-                return "(нет TxID)" # Возвращаем текст, если TxID некорректен
+                return "(нет TxID)"
             if not enabled:
-                 return "➖" # Алерты выключены (используем ➖ вместо 끄)
+                 return "➖"
                  
             tx_id_str = str(tx_id)
             info = history.get(tx_id_str)
             if info:
                 status = info.get('status')
                 attempt = info.get('attempt', 0)
-                MAX_ATTEMPTS = 5
                 if status == "success":
                     return "✅"
-                elif status == "failed":
-                    return "⏳" if attempt < MAX_ATTEMPTS else "❌"
+                elif status == "failed": # Это должно быть "error" или "pending" если не success
+                    return "⏳" if attempt < APP_MAX_ALERT_ATTEMPTS else "❌"
                 elif status == "pending":
                     return "⏳"
-                else: # Неизвестный статус
+                elif status == "error": # Добавляем явную проверку на error
+                    return "⏳" if attempt < APP_MAX_ALERT_ATTEMPTS else "❌"
+                else:
                     return "❓"
             else:
-                # Нет в истории
-                return "" # Или можно "➖", если хотите явный статус
+                return ""
 
-        # Применяем функцию к transactions_df_with_status (где есть TxID)
+        alert_column_name = "Alert" 
+
         if 'TxID' in transactions_df_with_status.columns:
-            transactions_df_with_status['Статус Telegram'] = transactions_df_with_status['TxID'].apply(
+            transactions_df_with_status[alert_column_name] = transactions_df_with_status['TxID'].apply(
                 lambda txid: get_status_icon(txid, alert_history, alerts_enabled)
             )
         else:
-            print("Warning: TxID column not found in transactions_df_with_status, cannot add Telegram status icons.")
-            transactions_df_with_status['Статус Telegram'] = "(нет TxID)"
-        # --- Конец добавления колонки статуса --- 
+            transactions_df_with_status[alert_column_name] = "(нет TxID)"
             
         with st.expander("Найденные транзакции", expanded=True):
-            # Определяем колонки для отображения *после* добавления статуса
-            cols_to_display = [col for col in transactions_df_with_status.columns if col != 'TxID']
-            df_display = transactions_df_with_status[cols_to_display]
+            cols_in_df = transactions_df_with_status.columns.tolist()
+            
+            ordered_cols = []
+            if alert_column_name in cols_in_df:
+                ordered_cols.append(alert_column_name)
+            
+            for col in cols_in_df:
+                if col != alert_column_name:
+                    ordered_cols.append(col)
+            
+            df_display = transactions_df_with_status[ordered_cols]
 
             st.dataframe(
                 df_display, 
@@ -665,12 +662,12 @@ def render_main_content():
                 column_config={
                     "Откуда": st.column_config.TextColumn(width="medium"),
                     "Куда": st.column_config.TextColumn(width="medium"),
-                    "Статус Telegram": st.column_config.TextColumn(width="small") 
+                   # alert_column_name: st.column_config.TextColumn(width="small") # ИЗМЕНЕНО: обратно на "small"
                 }
             )
             
-    else: # Если transactions_df_original пустой
-        if st.session_state.get('initialized'): # Показываем инфо только если инициализация прошла
+    else:
+        if st.session_state.get('initialized'):
              st.info("Транзакции по заданным фильтрам не найдены или еще не были запрошены.")
 
     with st.expander("Информация о кеше (адреса и токены)", expanded=False):
