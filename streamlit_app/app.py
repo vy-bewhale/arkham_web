@@ -4,6 +4,7 @@ st.set_page_config(layout="wide", page_title="Arkham Client Explorer")
 import pandas as pd
 import os
 import time # Добавляем импорт time
+import threading # Добавляем импорт threading
 from dotenv import load_dotenv
 import arkham_service # Модуль с логикой Arkham
 import telegram_service # НОВЫЙ импорт для Telegram
@@ -31,6 +32,51 @@ WHITELIST_KEYS = [
 localS = LocalStorage()
 
 APP_MAX_ALERT_ATTEMPTS = 5
+
+# Функция для выполнения в отдельном потоке
+def _threaded_send_alert_and_update_status(
+    bot_token: str,
+    chat_id: str,
+    message_html: str,
+    tx_hash: str,
+    attempt_number: int,
+    original_timestamp_from_data: Any 
+):
+    try:
+        success = telegram_service.send_telegram_alert(bot_token, chat_id, message_html)
+        send_time = time.time()
+        final_status = "success" if success else \
+                       ("error" if attempt_number >= APP_MAX_ALERT_ATTEMPTS else "pending")
+        
+        current_alert_entry = st.session_state.alert_history.get(tx_hash, {})
+
+        st.session_state.alert_history[tx_hash] = {
+            'status': final_status,
+            'attempt': attempt_number, 
+            'last_attempt_time': send_time, 
+            'sent_time': send_time if success else current_alert_entry.get('sent_time'),
+            'original_timestamp_from_data': original_timestamp_from_data
+        }
+    except Exception as e:
+        print(f"Error in _threaded_send_alert_and_update_status for tx {tx_hash}: {e}")
+        # Попытаемся установить статус pending для повторной попытки
+        # если это не ошибка, связанная с st.session_state
+        try:
+            st.session_state.alert_history[tx_hash] = {
+                'status': 'pending', # Ставим pending для повтора
+                'attempt': attempt_number, # Сохраняем текущую попытку, следующая будет +1
+                'last_attempt_time': time.time(),
+                'sent_time': st.session_state.alert_history.get(tx_hash, {}).get('sent_time'), # Сохраняем старое время отправки если было
+                'original_timestamp_from_data': original_timestamp_from_data
+            }
+        except Exception as se_e: # Ошибка при обновлении session_state
+            print(f"Critical error updating session_state in threaded exception handler for tx {tx_hash}: {se_e}")
+            # Тут мало что можно сделать, данные могут быть потеряны для этого алерта
+    finally:
+        # В любом случае (кроме критической ошибки выше) пытаемся обновить UI
+        # Эта строчка должна быть здесь, чтобы UI обновлялся после завершения потока,
+        # даже если send_telegram_alert вернул false и статус стал 'pending' или 'error'.
+        st.rerun() # <- ВОЗВРАЩАЕМ ЭТОТ ВЫЗОВ
 
 def _get_rotation_priority_key(item_data: Dict[str, Any]):
     status = item_data.get('status')
@@ -277,27 +323,57 @@ def _process_telegram_alerts(transactions_df: pd.DataFrame):
         if alert_info is None:
             should_send = True
             current_attempt = 1
-        elif alert_info.get('status') in ["pending", "error"]:
+        elif alert_info.get('status') in ["pending", "error", "sending"]:
+            # Если статус 'error', но попыток меньше максимума - это было состояние 'pending' до перезапуска
+            # или если статус 'sending' и что-то пошло не так до завершения потока (например, перезапуск приложения)
             last_attempt_time = alert_info.get('last_attempt_time', 0)
             attempts_done = alert_info.get('attempt', 0) 
-            if attempts_done < APP_MAX_ALERT_ATTEMPTS and (current_time - last_attempt_time >= 60):
+            # Интервал для ретрая, можно сделать его больше для 'sending', если нужно
+            retry_interval = 60 
+            if alert_info.get('status') == 'sending':
+                # Можно увеличить интервал ожидания для зависших 'sending' статусов
+                # retry_interval = 120 # например, 2 минуты
+                pass # Пока оставим стандартный интервал
+
+            if attempts_done < APP_MAX_ALERT_ATTEMPTS and (current_time - last_attempt_time >= retry_interval):
                 should_send = True
                 current_attempt = attempts_done + 1
+        
         if should_send:
             message_html = telegram_service.format_telegram_message(row)
             if message_html:
-                success = telegram_service.send_telegram_alert(bot_token, chat_id, message_html)
-                new_status = "success" if success else ("error" if current_attempt >= APP_MAX_ALERT_ATTEMPTS else "pending")
-                sent_time_val = current_time if success else (alert_info.get('sent_time') if alert_info and 'sent_time' in alert_info else None) 
+                # 1. Оптимистично обновляем статус на 'sending'
                 current_cycle_alert_history[tx_hash_str] = {
-                    'status': new_status,
+                    'status': 'sending', 
                     'attempt': current_attempt,
-                    'last_attempt_time': current_time,
-                    'sent_time': sent_time_val,
-                    'original_timestamp_from_data': row.get('time')
+                    'last_attempt_time': current_time, 
+                    'sent_time': (alert_info.get('sent_time') if alert_info else None),
+                    'original_timestamp_from_data': row.get('time') 
                 }
                 history_updated = True
-                time.sleep(0.1)
+
+                # 2. Запускаем отправку в отдельном потоке
+                alert_thread = threading.Thread(
+                    target=_threaded_send_alert_and_update_status,
+                    args=(
+                        bot_token,
+                        chat_id,
+                        message_html,
+                        tx_hash_str,
+                        current_attempt,
+                        row.get('time') 
+                    )
+                )
+                try:
+                    st.runtime.scriptrunner.add_script_run_ctx(alert_thread)
+                except AttributeError:
+                    # Для более старых версий Streamlit, если st.runtime.scriptrunner отсутствует
+                    from streamlit.runtime.scriptrunner import add_script_run_ctx
+                    add_script_run_ctx(alert_thread)
+                alert_thread.start()
+                
+                # time.sleep(0.1) # Этот sleep больше не нужен здесь, так как отправка асинхронна
+    
     if history_updated:
         save_alert_history(current_cycle_alert_history)
 
@@ -497,12 +573,12 @@ def render_main_content():
                 attempt = info.get('attempt', 0)
                 if status == "success":
                     return "✅"
-                elif status == "failed":
-                    return "⏳" if attempt < APP_MAX_ALERT_ATTEMPTS else "❌"
+                elif status == "sending":
+                    return "💨"
                 elif status == "pending":
-                    return "⏳"
+                    return "⚠️"
                 elif status == "error":
-                    return "⏳" if attempt < APP_MAX_ALERT_ATTEMPTS else "❌"
+                    return "❌"
                 else:
                     return "❓"
             else:
