@@ -704,9 +704,9 @@ def render_main_content():
             ordered_cols = []
             if alert_column_name in cols_in_df:
                 ordered_cols.append(alert_column_name)
-            # Добавляем остальные колонки, исключая TxID для отображения
+            # Добавляем остальные колонки, Включая TxID для отображения
             for col in transactions_df_original.columns: # Используем original, чтобы порядок был как от API
-                if col != 'TxID' and col in cols_in_df and col != alert_column_name:
+                if col in cols_in_df and col != alert_column_name:
                     ordered_cols.append(col)
             
             df_display = transactions_df_with_status[ordered_cols]
