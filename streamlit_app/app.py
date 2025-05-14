@@ -102,7 +102,7 @@ def initialize_session_state():
 def load_app_settings():
     if "app_state_loaded" not in st.session_state:
         try:
-            raw_state = localS.getItem("app_state") # Убран key
+            raw_state = localS.getItem("app_settings_storage") # ИСПРАВЛЕНО: используем правильное имя ключа
             if raw_state:
                 state_dict = json.loads(raw_state)
                 if state_dict.get("state_version") == 1:
@@ -136,7 +136,7 @@ def save_app_settings():
         if 'alert_history' in state_to_save and not isinstance(state_to_save['alert_history'], dict):
             state_to_save['alert_history'] = {}
         # print(f"SAVING app_settings_storage: {json.dumps(state_to_save, ensure_ascii=False)[:200]}") # DEBUG
-        localS.setItem("app_state", json.dumps(state_to_save, ensure_ascii=False), key="app_settings_storage")
+        localS.setItem("app_settings_storage", json.dumps(state_to_save, ensure_ascii=False)) # Используем имя ключа как первый аргумент
     except Exception as e:
         # print(f"Error saving app settings to localStorage: {e}") # DEBUG
         pass
@@ -148,7 +148,7 @@ def load_arkham_cache(arkham_monitor):
     if 'arkham_cache_loaded' in st.session_state:
         del st.session_state['arkham_cache_loaded']
     try:
-        raw_cache = localS.getItem("arkham_alert_cache") # Убран key
+        raw_cache = localS.getItem("arkham_cache_storage") # ИСПРАВЛЕНО: используем правильное имя ключа
         if raw_cache:
             # print(f"LOADING arkham_alert_cache from localStorage. Size: {len(raw_cache)} bytes") # DEBUG
             cache_dict = json.loads(raw_cache)
@@ -181,7 +181,7 @@ def save_arkham_cache(arkham_monitor):
         try:
             cache_to_save = arkham_monitor.get_full_cache_state()
             # print(f"SAVING arkham_cache_storage: {json.dumps(cache_to_save, ensure_ascii=False)[:200]}") # DEBUG
-            localS.setItem("arkham_alert_cache", json.dumps(cache_to_save, ensure_ascii=False), key="arkham_cache_storage")
+            localS.setItem("arkham_cache_storage", json.dumps(cache_to_save, ensure_ascii=False)) # Используем имя ключа как первый аргумент
         except Exception as e:
             # print(f"Error saving Arkham cache to localStorage: {e}") # DEBUG
             pass
@@ -794,13 +794,13 @@ def get_localstorage_size():
         
         # Считаем только те ключи, которые мы используем: "app_state" и "arkham_alert_cache"
         total_size_bytes = 0
-        app_state_raw = localS.getItem("app_state")
+        app_state_raw = localS.getItem("app_settings_storage") # ИСПРАВЛЕНО: используем правильное имя ключа
         if app_state_raw:
-            total_size_bytes += len(json.dumps("app_state", ensure_ascii=False)) + len(json.dumps(app_state_raw, ensure_ascii=False))
+            total_size_bytes += len(json.dumps("app_settings_storage", ensure_ascii=False)) + len(json.dumps(app_state_raw, ensure_ascii=False))
         
-        arkham_cache_raw = localS.getItem("arkham_alert_cache")
+        arkham_cache_raw = localS.getItem("arkham_cache_storage") # ИСПРАВЛЕНО: используем правильное имя ключа
         if arkham_cache_raw:
-            total_size_bytes += len(json.dumps("arkham_alert_cache", ensure_ascii=False)) + len(json.dumps(arkham_cache_raw, ensure_ascii=False))
+            total_size_bytes += len(json.dumps("arkham_cache_storage", ensure_ascii=False)) + len(json.dumps(arkham_cache_raw, ensure_ascii=False))
             
         return total_size_bytes / (1024 * 1024)
     except Exception as e:
@@ -893,20 +893,20 @@ def _send_individual_alert_threaded(
     original_timestamp: Any 
 ):
     tx_hash_str = str(tx_hash) 
-    print(f"THREAD_SEND ({tx_hash_str}): Starting attempt {attempt_number}.")
+    # print(f"THREAD_SEND ({tx_hash_str}): Starting attempt {attempt_number}.") # DEBUG_REMOVED
     try:
         success = telegram_service.send_telegram_alert(bot_token, chat_id, message_html)
         send_time = time.time()
         final_status = ""
         if success:
             final_status = "success"
-            print(f"THREAD_SEND ({tx_hash_str}): Attempt {attempt_number} SUCCESSFUL.")
+            # print(f"THREAD_SEND ({tx_hash_str}): Attempt {attempt_number} SUCCESSFUL.") # DEBUG_REMOVED
         elif attempt_number >= APP_MAX_ALERT_ATTEMPTS:
             final_status = "error"
-            print(f"THREAD_SEND ({tx_hash_str}): Attempt {attempt_number} FAILED. Max attempts reached.")
+            # print(f"THREAD_SEND ({tx_hash_str}): Attempt {attempt_number} FAILED. Max attempts reached.") # DEBUG_REMOVED
         else:
             final_status = "pending"
-            print(f"THREAD_SEND ({tx_hash_str}): Attempt {attempt_number} FAILED. Will retry. Status set to pending.")
+            # print(f"THREAD_SEND ({tx_hash_str}): Attempt {attempt_number} FAILED. Will retry. Status set to pending.") # DEBUG_REMOVED
         
         # Важно: Обновляем st.session_state.alert_history.
         # Делаем это через .get().copy() и затем присваивание, чтобы избежать частичных обновлений словаря,
@@ -920,10 +920,10 @@ def _send_individual_alert_threaded(
             'original_timestamp_from_data': original_timestamp 
         })
         st.session_state.alert_history[tx_hash_str] = current_alert_entry
-        print(f"THREAD_SEND ({tx_hash_str}): Updated alert_history in session_state: {st.session_state.alert_history[tx_hash_str]}")
+        # print(f"THREAD_SEND ({tx_hash_str}): Updated alert_history in session_state: {st.session_state.alert_history[tx_hash_str]}") # DEBUG_REMOVED
 
     except Exception as e:
-        print(f"THREAD_SEND ({tx_hash_str}): EXCEPTION during send attempt {attempt_number}: {e}")
+        # print(f"THREAD_SEND ({tx_hash_str}): EXCEPTION during send attempt {attempt_number}: {e}") # DEBUG_REMOVED
         try:
             error_status_in_thread = 'error' if attempt_number >= APP_MAX_ALERT_ATTEMPTS else 'pending'
             
@@ -935,16 +935,16 @@ def _send_individual_alert_threaded(
                 'original_timestamp_from_data': original_timestamp
             })
             st.session_state.alert_history[tx_hash_str] = current_alert_entry_on_exc
-            print(f"THREAD_SEND ({tx_hash_str}): Updated alert_history on EXCEPTION: {st.session_state.alert_history[tx_hash_str]}")
+            # print(f"THREAD_SEND ({tx_hash_str}): Updated alert_history on EXCEPTION: {st.session_state.alert_history[tx_hash_str]}") # DEBUG_REMOVED
         except Exception as se_e: 
-            print(f"THREAD_SEND ({tx_hash_str}): Double EXCEPTION while updating session_state: {se_e}")
+            # print(f"THREAD_SEND ({tx_hash_str}): Double EXCEPTION while updating session_state: {se_e}") # DEBUG_REMOVED
             pass 
     finally:
-        print(f"THREAD_SEND ({tx_hash_str}): Entering finally block for attempt {attempt_number}.")
+        # print(f"THREAD_SEND ({tx_hash_str}): Entering finally block for attempt {attempt_number}.") # DEBUG_REMOVED
         st.session_state.is_sending_alert = False
         st.session_state.dispatch_completed_trigger_rerun = True
         st.session_state.alert_history_updated_by_thread = True 
-        print(f"THREAD_SEND ({tx_hash_str}): Finished attempt {attempt_number}. Status in history: {st.session_state.alert_history.get(tx_hash_str, {}).get('status')}. Flags set: is_sending_alert=False, dispatch_completed_trigger_rerun=True, alert_history_updated_by_thread=True.")
+        # print(f"THREAD_SEND ({tx_hash_str}): Finished attempt {attempt_number}. Status in history: {st.session_state.alert_history.get(tx_hash_str, {}).get('status')}. Flags set: is_sending_alert=False, dispatch_completed_trigger_rerun=True, alert_history_updated_by_thread=True.") # DEBUG_REMOVED
 
 def _get_rotation_priority_key(item_data: Dict[str, Any]):
     status = item_data.get('status')
