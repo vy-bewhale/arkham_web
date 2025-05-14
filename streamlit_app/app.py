@@ -5,6 +5,7 @@ import pandas as pd
 import os
 import time # Добавляем импорт time
 import threading # Добавляем импорт threading
+from collections import deque # Добавляем импорт deque
 from dotenv import load_dotenv
 import arkham_service # Модуль с логикой Arkham
 import telegram_service # НОВЫЙ импорт для Telegram
@@ -33,71 +34,16 @@ localS = LocalStorage()
 
 APP_MAX_ALERT_ATTEMPTS = 5
 
-# Функция для выполнения в отдельном потоке
-def _threaded_send_alert_and_update_status(
-    bot_token: str,
-    chat_id: str,
-    message_html: str,
-    tx_hash: str,
-    attempt_number: int,
-    original_timestamp_from_data: Any 
-):
-    try:
-        success = telegram_service.send_telegram_alert(bot_token, chat_id, message_html)
-        send_time = time.time()
-        final_status = "success" if success else \
-                       ("error" if attempt_number >= APP_MAX_ALERT_ATTEMPTS else "pending")
-        
-        current_alert_entry = st.session_state.alert_history.get(tx_hash, {})
-
-        st.session_state.alert_history[tx_hash] = {
-            'status': final_status,
-            'attempt': attempt_number, 
-            'last_attempt_time': send_time, 
-            'sent_time': send_time if success else current_alert_entry.get('sent_time'),
-            'original_timestamp_from_data': original_timestamp_from_data
-        }
-    except Exception as e:
-        print(f"Error in _threaded_send_alert_and_update_status for tx {tx_hash}: {e}")
-        # Попытаемся установить статус pending для повторной попытки
-        # если это не ошибка, связанная с st.session_state
-        try:
-            st.session_state.alert_history[tx_hash] = {
-                'status': 'pending', # Ставим pending для повтора
-                'attempt': attempt_number, # Сохраняем текущую попытку, следующая будет +1
-                'last_attempt_time': time.time(),
-                'sent_time': st.session_state.alert_history.get(tx_hash, {}).get('sent_time'), # Сохраняем старое время отправки если было
-                'original_timestamp_from_data': original_timestamp_from_data
-            }
-        except Exception as se_e: # Ошибка при обновлении session_state
-            print(f"Critical error updating session_state in threaded exception handler for tx {tx_hash}: {se_e}")
-            # Тут мало что можно сделать, данные могут быть потеряны для этого алерта
-    finally:
-        # В любом случае (кроме критической ошибки выше) пытаемся обновить UI
-        # Эта строчка должна быть здесь, чтобы UI обновлялся после завершения потока,
-        # даже если send_telegram_alert вернул false и статус стал 'pending' или 'error'.
-        st.rerun() # <- ВОЗВРАЩАЕМ ЭТОТ ВЫЗОВ
-
-def _get_rotation_priority_key(item_data: Dict[str, Any]):
-    status = item_data.get('status')
-    attempt = item_data.get('attempt', 0)
-    
-    if status in ["error", "pending"]:
-        if attempt >= APP_MAX_ALERT_ATTEMPTS:
-            priority_group = 0
-        else:
-            priority_group = 1
-        time_value = item_data.get('last_attempt_time', 0)
-    elif status == "success":
-        priority_group = 2
-        time_value = item_data.get('sent_time', 0)
-    else:
-        priority_group = 1
-        time_value = item_data.get('last_attempt_time', 0)
-    return (priority_group, time_value)
-
 def initialize_session_state():
-    if 'initialized' not in st.session_state:
+    # Эти состояния нужны всегда, независимо от 'initialized'
+    if 'alert_queue' not in st.session_state: # Очередь пока оставляем, но ее роль может измениться
+        st.session_state.alert_queue = deque()
+    if 'is_sending_alert' not in st.session_state: # Новый флаг для контроля одновременной отправки
+        st.session_state.is_sending_alert = False
+    if 'dispatch_completed_trigger_rerun' not in st.session_state: # Новый флаг
+        st.session_state.dispatch_completed_trigger_rerun = False
+
+    if 'initialized' not in st.session_state: # Этот блок для состояний, которые могут загружаться из localStorage
         dotenv_path = os.path.join(os.path.dirname(__file__), '..', '.env') 
         load_dotenv(dotenv_path=dotenv_path)
         api_key = os.getenv("ARKHAM_API_KEY")
@@ -126,6 +72,7 @@ def initialize_session_state():
         st.session_state.telegram_alerts_enabled = False
         st.session_state.alert_history = {}
         st.session_state.telegram_bot_token = ''
+        
         st.session_state.initialized = True
 
     api_key_present = st.session_state.get('api_key') or os.getenv("ARKHAM_API_KEY")
@@ -149,7 +96,6 @@ def initialize_session_state():
         if not st.session_state.get('error_message'):
              st.session_state.error_message = "ARKHAM_API_KEY не найден."
              
-
 def load_app_settings():
     if "app_state_loaded" not in st.session_state:
         try:
@@ -165,16 +111,13 @@ def load_app_settings():
                                     if isinstance(loaded_history, dict):
                                         st.session_state[k] = loaded_history
                                     else:
-                                        print(f"Warning: Loaded alert_history is not a dict, resetting.")
                                         st.session_state[k] = {}
                                 except json.JSONDecodeError:
-                                    print(f"Warning: Could not decode alert_history from localStorage, resetting.")
                                     st.session_state[k] = {}
                             else:
                                 st.session_state[k] = state_dict[k]
             st.session_state.app_state_loaded = True
         except Exception as e:
-            print(f"Error loading app settings from localStorage: {e}")
             st.session_state.app_state_loaded = True
 
 def save_app_settings():
@@ -187,11 +130,9 @@ def save_app_settings():
                         state_to_save[k][subk] = list(v)
         state_to_save["state_version"] = 1
         if 'alert_history' in state_to_save and not isinstance(state_to_save['alert_history'], dict):
-            print("Warning: alert_history is not a dict during save, saving empty dict instead.")
             state_to_save['alert_history'] = {}
         localS.setItem("app_state", json.dumps(state_to_save, ensure_ascii=False), key="app_settings_storage")
     except Exception as e:
-        print(f"Error saving app settings to localStorage: {e}")
         pass
 
 def load_arkham_cache(arkham_monitor):
@@ -221,8 +162,7 @@ def load_arkham_cache(arkham_monitor):
         else:
             st.session_state.cache_initialized_flag = False
             st.session_state.arkham_cache_loaded = False
-    except Exception as e: 
-        print(f"Error loading arkham cache from localStorage: {e}")
+    except Exception as e:
         st.session_state.cache_initialized_flag = False
         st.session_state.arkham_cache_loaded = False
 
@@ -231,8 +171,7 @@ def save_arkham_cache(arkham_monitor):
         try:
             cache_to_save = arkham_monitor.get_full_cache_state()
             localS.setItem("arkham_alert_cache", json.dumps(cache_to_save, ensure_ascii=False), key="arkham_cache_storage")
-        except Exception as e: 
-            print(f"Error saving arkham cache to localStorage: {e}")
+        except Exception as e:
             pass
 
 def save_alert_history(history: Dict[str, Dict[str, Any]]):
@@ -253,7 +192,6 @@ def save_alert_history(history: Dict[str, Dict[str, Any]]):
         st.session_state.alert_history = history_copy_for_saving 
         save_app_settings() # Это вызовет localS.setItem с key="app_settings_storage"
     except Exception as e:
-        print(f"Error in save_alert_history when calling save_app_settings: {e}")
         pass
 
 def handle_populate_cache_button():
@@ -305,77 +243,130 @@ def _process_telegram_alerts(transactions_df: pd.DataFrame):
     chat_id = st.session_state.get('telegram_chat_id', '')
     if not bot_token or not chat_id:
         return
+        
     session_history = st.session_state.get('alert_history', {})
-    history_updated = False
-    current_time = time.time()
+    history_updated_this_cycle = False
+    current_time_for_check = time.time()
+
     if 'TxID' not in transactions_df.columns or transactions_df.empty:
         return
+
     transactions_df_to_process = transactions_df.iloc[::-1]
     current_cycle_alert_history = session_history.copy()
+
     for index, row in transactions_df_to_process.iterrows():
         tx_hash = row.get('TxID')
         if not tx_hash or pd.isna(tx_hash) or tx_hash == 'N/A':
             continue
-        tx_hash_str = str(tx_hash)
-        alert_info = current_cycle_alert_history.get(tx_hash_str) 
-        should_send = False
-        current_attempt = 0
-        if alert_info is None:
-            should_send = True
-            current_attempt = 1
-        elif alert_info.get('status') in ["pending", "error", "sending"]:
-            # Если статус 'error', но попыток меньше максимума - это было состояние 'pending' до перезапуска
-            # или если статус 'sending' и что-то пошло не так до завершения потока (например, перезапуск приложения)
-            last_attempt_time = alert_info.get('last_attempt_time', 0)
-            attempts_done = alert_info.get('attempt', 0) 
-            # Интервал для ретрая, можно сделать его больше для 'sending', если нужно
-            retry_interval = 60 
-            if alert_info.get('status') == 'sending':
-                # Можно увеличить интервал ожидания для зависших 'sending' статусов
-                # retry_interval = 120 # например, 2 минуты
-                pass # Пока оставим стандартный интервал
-
-            if attempts_done < APP_MAX_ALERT_ATTEMPTS and (current_time - last_attempt_time >= retry_interval):
-                should_send = True
-                current_attempt = attempts_done + 1
         
-        if should_send:
+        tx_hash_str = str(tx_hash)
+        alert_info = current_cycle_alert_history.get(tx_hash_str)
+        
+        should_queue_task = False # Переименовали флаг для ясности
+        current_attempt_number = 0
+
+        if alert_info is None:
+            should_queue_task = True
+            current_attempt_number = 1
+        elif alert_info.get('status') in ["pending", "error"]:
+            last_attempt_time = alert_info.get('last_attempt_time', 0)
+            attempts_done = alert_info.get('attempt', 0)
+            retry_interval = 60 
+            if attempts_done < APP_MAX_ALERT_ATTEMPTS and \
+               (current_time_for_check - last_attempt_time >= retry_interval):
+                should_queue_task = True
+                current_attempt_number = attempts_done + 1
+        # Статусы 'success' и 'queued' (если он уже был выставлен кем-то)
+        # не должны приводить к повторной постановке в очередь.
+        # Особенно 'queued', т.к. задача уже ждет.
+        elif alert_info.get('status') == 'queued':
+             should_queue_task = False # Уже в очереди, ничего не делаем
+
+        if should_queue_task:
             message_html = telegram_service.format_telegram_message(row)
             if message_html:
-                # 1. Оптимистично обновляем статус на 'sending'
+                # Обновляем статус на 'queued' в локальной копии истории
                 current_cycle_alert_history[tx_hash_str] = {
-                    'status': 'sending', 
-                    'attempt': current_attempt,
-                    'last_attempt_time': current_time, 
+                    'status': 'queued',
+                    'attempt': current_attempt_number,
+                    'last_attempt_time': current_time_for_check, 
                     'sent_time': (alert_info.get('sent_time') if alert_info else None),
-                    'original_timestamp_from_data': row.get('time') 
+                    'original_timestamp_from_data': row.get('Время')
                 }
-                history_updated = True
+                history_updated_this_cycle = True
 
-                # 2. Запускаем отправку в отдельном потоке
-                alert_thread = threading.Thread(
-                    target=_threaded_send_alert_and_update_status,
-                    args=(
-                        bot_token,
-                        chat_id,
-                        message_html,
-                        tx_hash_str,
-                        current_attempt,
-                        row.get('time') 
-                    )
-                )
-                try:
-                    st.runtime.scriptrunner.add_script_run_ctx(alert_thread)
-                except AttributeError:
-                    # Для более старых версий Streamlit, если st.runtime.scriptrunner отсутствует
-                    from streamlit.runtime.scriptrunner import add_script_run_ctx
-                    add_script_run_ctx(alert_thread)
-                alert_thread.start()
-                
-                # time.sleep(0.1) # Этот sleep больше не нужен здесь, так как отправка асинхронна
+                # Формируем задачу для очереди
+                task_data_for_queue = {
+                    'bot_token': bot_token,
+                    'chat_id': chat_id,
+                    'message_html': message_html,
+                    'tx_hash': tx_hash_str,
+                    'attempt_number': current_attempt_number,
+                    'original_timestamp': row.get('Время')
+                }
+                # Добавляем задачу в st.session_state.alert_queue
+                st.session_state.alert_queue.append(task_data_for_queue)
+            else:
+                current_cycle_alert_history[tx_hash_str] = {
+                    'status': 'error', # Ошибка форматирования
+                    'attempt': current_attempt_number, # или 0, если это первая попытка
+                    'last_attempt_time': current_time_for_check,
+                    'sent_time': None,
+                    'original_timestamp_from_data': row.get('Время')
+                }
+                history_updated_this_cycle = True
     
-    if history_updated:
+    if history_updated_this_cycle:
         save_alert_history(current_cycle_alert_history)
+
+# Новая функция-диспетчер для последовательного запуска алертов
+def _dispatch_next_alert_if_needed():
+    if not st.session_state.get('is_sending_alert', False) and st.session_state.alert_queue:
+        task_to_send = st.session_state.alert_queue.popleft()
+        tx_hash_to_send = task_to_send.get('tx_hash')
+        
+        st.session_state.is_sending_alert = True # Устанавливаем флаг немедленно
+
+        # Обновляем статус на 'sending' в alert_history СРАЗУ
+        if tx_hash_to_send and tx_hash_to_send in st.session_state.alert_history:
+            st.session_state.alert_history[tx_hash_to_send]['status'] = 'sending'
+            st.session_state.alert_history[tx_hash_to_send]['last_attempt_time'] = time.time() # Обновим время попытки
+            # Не вызываем save_alert_history() здесь, чтобы избежать слишком частых сохранений,
+            # это произойдет позже или при следующем штатном сохранении.
+
+        thread_args = {
+            'bot_token': task_to_send.get('bot_token'),
+            'chat_id': task_to_send.get('chat_id'),
+            'message_html': task_to_send.get('message_html'),
+            'tx_hash': task_to_send.get('tx_hash'),
+            'attempt_number': task_to_send.get('attempt_number'),
+            'original_timestamp': task_to_send.get('original_timestamp')
+        }
+
+        alert_dispatch_thread = threading.Thread(target=_send_individual_alert_threaded, kwargs=thread_args, daemon=True)
+        try:
+            st.runtime.scriptrunner.add_script_run_ctx(alert_dispatch_thread)
+            alert_dispatch_thread.start()
+        except AttributeError:
+            try:
+                from streamlit.runtime.scriptrunner import add_script_run_ctx
+                add_script_run_ctx(alert_dispatch_thread)
+                alert_dispatch_thread.start()
+            except ImportError as e_import_ctx:
+                st.session_state.alert_queue.appendleft(task_to_send)
+                st.session_state.is_sending_alert = False
+                if tx_hash_to_send and tx_hash_to_send in st.session_state.alert_history:
+                    st.session_state.alert_history[tx_hash_to_send]['status'] = 'error'
+            except Exception as e_ctx_attach_start: # Ловим другие ошибки привязки/старта
+                st.session_state.alert_queue.appendleft(task_to_send)
+                st.session_state.is_sending_alert = False
+                if tx_hash_to_send and tx_hash_to_send in st.session_state.alert_history:
+                    st.session_state.alert_history[tx_hash_to_send]['status'] = 'error'
+        except Exception as e_thread_start:
+            st.session_state.alert_queue.appendleft(task_to_send)
+            st.session_state.is_sending_alert = False
+            if tx_hash_to_send and tx_hash_to_send in st.session_state.alert_history:
+                st.session_state.alert_history[tx_hash_to_send]['status'] = 'error'
 
 def _fetch_and_update_table():
     if not st.session_state.arkham_monitor:
@@ -410,7 +401,6 @@ def _fetch_and_update_table():
                 _process_telegram_alerts(st.session_state.transactions_df)
             except Exception as e:
                 st.error(f"Ошибка при обработке Telegram алертов: {e}")
-                print(f"Error processing Telegram alerts: {e}")
         if st.session_state.arkham_monitor:
             updated_tokens = st.session_state.arkham_monitor.get_known_token_symbols()
             updated_addresses = st.session_state.arkham_monitor.get_known_address_names()
@@ -529,7 +519,7 @@ def render_sidebar():
             "Включить алерты Telegram",
             key='telegram_alerts_enabled',
             help="Отправлять уведомления о новых транзакциях в Telegram.",
-            disabled=not alerts_can_be_enabled
+            disabled=not alerts_can_be_enabled,
         )
 
     with st.sidebar.expander("Автоматическое Обновление"):
@@ -564,25 +554,34 @@ def render_main_content():
         def get_status_icon(tx_id, history, enabled):
             if not tx_id or pd.isna(tx_id) or tx_id == 'N/A':
                 return "(нет TxID)"
+            
+            tx_id_str = str(tx_id)
+            if not isinstance(history, dict):
+                return "ERR_H_TYPE"
+
             if not enabled:
                  return "➖"
-            tx_id_str = str(tx_id)
+            
             info = history.get(tx_id_str)
-            if info:
-                status = info.get('status')
-                attempt = info.get('attempt', 0)
-                if status == "success":
-                    return "✅"
-                elif status == "sending":
-                    return "💨"
-                elif status == "pending":
-                    return "⚠️"
-                elif status == "error":
-                    return "❌"
-                else:
-                    return "❓"
+            
+            if info is None:
+                return "" # Causes empty cell
+
+            # info is not None from here
+            status = info.get('status')
+            attempt = info.get('attempt', 0)
+            if status == "success":
+                return "✅"
+            elif status == "sending":
+                return "💨"
+            elif status == "queued":
+                return "⏳"
+            elif status == "pending":
+                return "⚠️"
+            elif status == "error":
+                return "❌"
             else:
-                return ""
+                return "❓"
         alert_column_name = "Alert" 
         if 'TxID' in transactions_df_with_status.columns:
             transactions_df_with_status[alert_column_name] = transactions_df_with_status['TxID'].apply(
@@ -676,14 +675,17 @@ def get_localstorage_size():
         total_size_bytes = sum(len(json.dumps(key, ensure_ascii=False)) + len(json.dumps(value, ensure_ascii=False)) for key, value in all_data.items())
         return total_size_bytes / (1024 * 1024)
     except Exception as e:
-        print(f"Error getting localStorage size: {e}")
         return -1
 
 def main():
-    load_app_settings()
     initialize_session_state()
+    load_app_settings()
+    
     if st.session_state.get('arkham_monitor') is not None:
         load_arkham_cache(st.session_state.arkham_monitor)
+    
+    _dispatch_next_alert_if_needed()
+
     if st.session_state.get('error_message') and not st.session_state.get('arkham_monitor'):
         st.error(st.session_state.error_message)
         st.session_state.error_message = None 
@@ -695,18 +697,121 @@ def main():
         st.stop()
 
     render_sidebar()
-    render_main_content()
+    render_main_content() 
+
+    if st.session_state.get('dispatch_completed_trigger_rerun', False):
+        st.session_state.dispatch_completed_trigger_rerun = False
+        _dispatch_next_alert_if_needed()
+        st.rerun() 
+
+    _dispatch_next_alert_if_needed() 
 
     if st.session_state.get('auto_refresh_enabled', False):
         interval = st.session_state.get('auto_refresh_interval', 60)
-        placeholder = st.empty() 
-        placeholder.info(f"Автообновление таблицы через {interval} сек...")
-        time.sleep(interval) 
-        placeholder.empty()
-        _fetch_and_update_table()
-        st.rerun()
+        
+        if not st.session_state.alert_queue and not st.session_state.get('is_sending_alert', False):
+            placeholder = st.empty() 
+            placeholder.info(f"Автообновление таблицы через {interval} сек...")
+            time.sleep(interval) 
+            placeholder.empty()
+            _fetch_and_update_table()
+            _dispatch_next_alert_if_needed()
+            st.rerun()
+        else: # Очередь активна или идет отправка, короткий цикл
+            time.sleep(1)
+            _dispatch_next_alert_if_needed()
+            st.rerun()
     
     save_app_settings()
+
+# Новая функция для отправки одного алерта в отдельном короткоживущем потоке
+def _send_individual_alert_threaded(
+    bot_token: str,
+    chat_id: str,
+    message_html: str,
+    tx_hash: str,
+    attempt_number: int,
+    original_timestamp: Any 
+):
+    tx_hash_str = str(tx_hash) # Убедимся, что tx_hash это строка для логов
+    try:
+        success = telegram_service.send_telegram_alert(bot_token, chat_id, message_html)
+        send_time = time.time()
+        final_status = ""
+        if success:
+            final_status = "success"
+        elif attempt_number >= APP_MAX_ALERT_ATTEMPTS:
+            final_status = "error"
+        else:
+            final_status = "pending"
+        
+        current_alert_entry = st.session_state.alert_history.get(tx_hash_str, {})
+
+        st.session_state.alert_history[tx_hash_str] = {
+            'status': final_status,
+            'attempt': attempt_number,
+            'last_attempt_time': send_time,
+            'sent_time': send_time if success else current_alert_entry.get('sent_time'), # Сохраняем время первой успешной отправки
+            'original_timestamp_from_data': original_timestamp
+        }
+
+    except Exception as e:
+        try:
+            # Попытка обновить статус на pending или error в случае общей ошибки в потоке
+            # Это перезапишет статус, если он был установлен ранее в try блоке, но тут ошибка уровня потока
+            error_status_in_thread = 'error' if attempt_number >= APP_MAX_ALERT_ATTEMPTS else 'pending'
+            if tx_hash_str in st.session_state.alert_history:
+                st.session_state.alert_history[tx_hash_str].update({
+                    'status': error_status_in_thread,
+                    'last_attempt_time': time.time()
+                })
+            else: # Если вдруг записи нет, создадим ее с ошибкой
+                st.session_state.alert_history[tx_hash_str] = {
+                    'status': error_status_in_thread,
+                    'attempt': attempt_number,
+                    'last_attempt_time': time.time(),
+                    'sent_time': None,
+                    'original_timestamp_from_data': original_timestamp
+                }
+
+        except Exception as se_e: # Ошибка при обновлении session_state в обработчике исключений
+            pass # Добавляем pass, чтобы блок не был пустым
+    finally:
+        # Этот блок выполнится всегда, даже если в try или except был return или ошибка (кроме совсем фатальных)
+        st.session_state.is_sending_alert = False
+        st.session_state.dispatch_completed_trigger_rerun = True
+
+def _get_rotation_priority_key(item_data: Dict[str, Any]):
+    status = item_data.get('status')
+    attempt = item_data.get('attempt', 0)
+    
+    # Приоритеты для удаления (чем МЕНЬШЕ значение, тем РАНЬШЕ удалят):
+    # 0: Ошибки, исчерпавшие все попытки (самый высокий приоритет на удаление)
+    # 1: Успешно отправленные
+    # 2: В ожидании / Ошибка с попытками
+    # 3: В процессе отправки (краткосрочный статус)
+    # 4: В очереди (самый низкий приоритет на удаление / самый высокий на сохранение)
+
+    time_value = item_data.get('last_attempt_time', 0) # По умолчанию для сортировки внутри группы
+
+    if status == "error" and attempt >= APP_MAX_ALERT_ATTEMPTS:
+        priority_group = 0
+    elif status == "success":
+        priority_group = 1
+        time_value = item_data.get('sent_time', 0) # Для success используем sent_time
+    elif status in ["pending", "error"]:
+        priority_group = 2
+    elif status == "sending": # Этот статус очень короткий, но учтем
+        priority_group = 3 
+    elif status == "queued":
+        priority_group = 4
+    else: # Для любых других или неизвестных статусов - как pending
+        priority_group = 2 
+    
+    # Приоритет группы важнее, затем время (старые удаляются раньше внутри группы)
+    # Для групп с более высоким priority_group (т.е. те, что хотим сохранить дольше),
+    # если время одинаковое, это не так критично, но для удаляемых первыми (priority_group=0,1) - старые раньше.
+    return (priority_group, time_value)
 
 if __name__ == "__main__":
     main() 
